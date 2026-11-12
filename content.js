@@ -226,53 +226,10 @@
     let lastContextImage = null;
     let lastContextVideo = null;
 
-    // 判断某个元素应该对应哪种菜单文案
-    function menuModeOf(el) {
-        if (!el) return "photo";
-        try {
-            if (el.tagName === "VIDEO") {
-                const hasSource =
-                    readReactLivePhoto(el) ||
-                    absoluteUrl(el.currentSrc) ||
-                    absoluteUrl(el.getAttribute("src"));
-                return hasSource ? "live" : "photo";
-            }
-            if (el.tagName === "IMG") {
-                return readReactLivePhoto(el) ? "live" : "photo";
-            }
-        } catch {
-            // 解析失败时按普通图片处理
-        }
-        return "photo";
-    }
-
-    let publishedMode = null;
-    let lastHoverTarget = null;
-
-    function publishMenuMode(el) {
-        const mode = menuModeOf(el);
-        if (mode === publishedMode) return;
-        publishedMode = mode;
-        chrome.runtime
-            .sendMessage({ action: "setMenuMode", mode })
-            .catch(() => { });
-    }
-
-    // 鼠标进入图片时就预判。右键那一刻菜单已经开始渲染，
-    // 等到 contextmenu 再更新会慢一拍，第一次总是显示上一次的文案。
-    document.addEventListener("mouseover", (event) => {
-        const target = event.target;
-        if (!target || (target.tagName !== "IMG" && target.tagName !== "VIDEO")) return;
-        if (target === lastHoverTarget) return;
-        lastHoverTarget = target;
-        publishMenuMode(target);
-    }, true);
-
     document.addEventListener("contextmenu", (event) => {
         const target = event.target;
         lastContextImage = target && target.tagName === "IMG" ? target : null;
         lastContextVideo = target && target.tagName === "VIDEO" ? target : null;
-        publishMenuMode(target);
     }, true);
 
     function absoluteUrl(url) {

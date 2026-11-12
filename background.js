@@ -16,7 +16,7 @@ const CONTEXT_MENU_ID = "save-to-google-photos";
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     // 只保留一个顶层菜单项。多个顶层项会被 Chrome 折叠成二级菜单，
-    // 这里用单一入口，标题按右键目标切换，点击后自动判断走哪条路。
+    // 单一入口直接显示，点击后按内容自动判断走上传还是合成。
     chrome.contextMenus.create({
       id: CONTEXT_MENU_ID,
       title: "Save to Google Photos",
@@ -28,13 +28,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
   await handleSave(tab, info.srcUrl, info.mediaType);
-});
-
-// 切换标签页时把标题恢复默认，避免残留上一个页面的文案
-chrome.tabs.onActivated.addListener(() => {
-  chrome.contextMenus.update(CONTEXT_MENU_ID, { title: "Save to Google Photos" }, () => {
-    void chrome.runtime.lastError;
-  });
 });
 
 async function handleSave(tab, srcUrl, mediaType) {
@@ -486,18 +479,6 @@ function showToast(tabId, type, title, message) {
 // 8. Message handler for popup communication
 // --------------------------------------------------
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
-  if (request.action === "setMenuMode") {
-    const title =
-      request.mode === "live"
-        ? "Save Live Photo to Google Photos"
-        : "Save to Google Photos";
-    chrome.contextMenus.update(CONTEXT_MENU_ID, { title }, () => {
-      void chrome.runtime.lastError;
-    });
-    sendResponse({ ok: true });
-    return true;
-  }
-
   if (request.action === "getAuthToken") {
     getAuthToken(request.interactive)
       .then((token) => sendResponse({ success: true, token }))
