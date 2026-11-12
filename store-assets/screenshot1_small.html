@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 440px;
+            height: 280px;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            color: #e0e0e0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 24px 32px;
+            text-align: center;
+            max-width: 380px;
+        }
+
+        .title {
+            font-size: 22px;
+            font-weight: 800;
+            background: linear-gradient(90deg, #4285F4, #EA4335, #FBBC05, #34A853);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.55);
+            margin-bottom: 18px;
+            line-height: 1.5;
+        }
+
+        .steps {
+            display: flex;
+            gap: 14px;
+            justify-content: center;
+        }
+
+        .step {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 12px 10px;
+            width: 100px;
+            text-align: center;
+        }
+
+        .step-num {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #4285F4, #356ac3);
+            color: #fff;
+            font-weight: 700;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 8px;
+        }
+
+        .step-title {
+            font-size: 10px;
+            font-weight: 600;
+            color: #fff;
+            margin-bottom: 4px;
+        }
+
+        .step-desc {
+            font-size: 8px;
+            color: rgba(255, 255, 255, 0.4);
+            line-height: 1.4;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div class="title">Save to Google Photos</div>
+        <div class="subtitle">Right-click any image and save it to Google Photos</div>
+        <div class="steps">
+            <div class="step">
+                <div class="step-num">1</div>
+                <div class="step-title">Right-Click</div>
+                <div class="step-desc">Right-click any image</div>
+            </div>
+            <div class="step">
+                <div class="step-num">2</div>
+                <div class="step-title">Save</div>
+                <div class="step-desc">Select "Save to Google Photos"</div>
+            </div>
+            <div class="step">
+                <div class="step-num">3</div>
+                <div class="step-title">Done!</div>
+                <div class="step-desc">Image in your library</div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

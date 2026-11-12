@@ -22,14 +22,15 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
 
+  const tabId = tab?.id;
   const imageUrl = info.srcUrl;
   if (!imageUrl) {
-    showNotification("Error", "Could not determine image URL.");
+    showToast(tabId, "error", "Error", "Could not determine image URL.");
     return;
   }
 
   try {
-    showNotification("Uploading…", "Saving image to Google Photos…");
+    showToast(tabId, "loading", "Uploading…", "Saving image to Google Photos…");
 
     // 1) Get OAuth token
     const token = await getAuthToken(/* interactive */ true);
@@ -41,12 +42,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const uploadToken = await uploadBytes(token, blob, mimeType, fileName);
 
     // 4) Create media item
-    await createMediaItem(token, uploadToken, fileName);
+    await createMediaItem(token, uploadToken, fileName, imageUrl);
 
-    showNotification("Success ✅", "Image saved to Google Photos!");
+    showToast(tabId, "success", "Saved!", "Image saved to Google Photos");
   } catch (err) {
     console.error("[Save to Google Photos]", err);
-    showNotification("Upload Failed ❌", err.message || String(err));
+    showToast(tabId, "error", "Upload Failed", err.message || String(err));
   }
 });
 
@@ -128,11 +129,11 @@ async function uploadBytes(token, blob, mimeType, fileName) {
 // --------------------------------------------------
 // 5. Create media item (Step 2 of Google Photos upload)
 // --------------------------------------------------
-async function createMediaItem(token, uploadToken, fileName) {
+async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
   const body = {
     newMediaItems: [
       {
-        description: "Uploaded via Save to Google Photos extension",
+        description: sourceUrl || "",
         simpleMediaItem: {
           uploadToken,
           fileName,
@@ -167,14 +168,28 @@ async function createMediaItem(token, uploadToken, fileName) {
 }
 
 // --------------------------------------------------
-// 6. Notifications
+// 6. In-page toast notifications (via content script)
 // --------------------------------------------------
-function showNotification(title, message) {
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: "icons/icon128.png",
+function showToast(tabId, type, title, message) {
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, {
+    action: "showToast",
+    type,
     title,
     message,
+  }).catch(() => {
+    // Content script might not be injected yet, try to inject it
+    chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"],
+    }).then(() => {
+      chrome.tabs.sendMessage(tabId, {
+        action: "showToast",
+        type,
+        title,
+        message,
+      }).catch(() => { });
+    }).catch(() => { });
   });
 }
 
@@ -194,7 +209,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       if (token) {
         // Revoke the token on Google's side
         fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
-          .catch(() => {});
+          .catch(() => { });
         // Remove cached token
         chrome.identity.removeCachedAuthToken({ token }, () => {
           sendResponse({ success: true });

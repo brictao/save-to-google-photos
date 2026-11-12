@@ -1,13 +1,24 @@
 {
   "manifest_version": 3,
   "name": "Save to Google Photos",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Right-click any image to save it directly to your Google Photos library.",
   "permissions": [
     "contextMenus",
     "identity",
-    "notifications",
-    "activeTab"
+    "activeTab",
+    "scripting"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
   ],
   "host_permissions": [
     "https://photoslibrary.googleapis.com/*",

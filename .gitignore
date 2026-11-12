@@ -1,0 +1,13 @@
+# Auto Claude data directory
+.auto-claude/
+
+# macOS
+.DS_Store
+
+# 打包产物
+save-to-google-photos.zip
+
+# Live Photo 实验素材，含个人照片，不入库
+livephoto-test/source/
+livephoto-test/build/
+livephoto-test/output/

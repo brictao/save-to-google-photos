@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 1280px;
+            height: 800px;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            color: #e0e0e0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 60px;
+            overflow: hidden;
+        }
+
+        .popup-mock {
+            width: 320px;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .popup-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .popup-header h2 {
+            font-size: 15px;
+            font-weight: 700;
+            background: linear-gradient(90deg, #4285F4, #EA4335, #FBBC05, #34A853);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-circle {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: conic-gradient(#4285F4 0deg 90deg, #EA4335 90deg 180deg, #FBBC05 180deg 270deg, #34A853 270deg 360deg);
+            position: relative;
+        }
+
+        .logo-circle::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #1a1a2e;
+        }
+
+        .status-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 14px 16px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #34A853;
+            box-shadow: 0 0 8px rgba(52, 168, 83, 0.6);
+        }
+
+        .status-text {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .status-hint {
+            margin-top: 6px;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.45);
+        }
+
+        .btn-out {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.07);
+            color: #ccc;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .popup-footer {
+            text-align: center;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.35);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            padding-top: 4px;
+        }
+
+        .info-panel {
+            max-width: 500px;
+        }
+
+        .info-panel h1 {
+            font-size: 36px;
+            font-weight: 800;
+            color: #fff;
+            margin-bottom: 16px;
+        }
+
+        .info-panel p {
+            font-size: 18px;
+            color: rgba(255, 255, 255, 0.55);
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+
+        .features {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .feature {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 15px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .feature-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: rgba(66, 133, 244, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="popup-mock">
+        <div class="popup-header">
+            <div class="logo-circle"></div>
+            <h2>Save to Google Photos</h2>
+        </div>
+        <div class="status-card">
+            <div class="status-indicator">
+                <span class="dot"></span>
+                <span class="status-text">Signed In</span>
+            </div>
+            <p class="status-hint">You're connected to Google Photos.</p>
+        </div>
+        <div class="btn-out">⎋ Sign Out</div>
+        <div class="popup-footer">Right-click any image → <strong>Save to Google Photos</strong></div>
+    </div>
+
+    <div class="info-panel">
+        <h1>Clean & Simple UI</h1>
+        <p>Manage your Google account connection with a beautiful, intuitive popup interface.</p>
+        <div class="features">
+            <div class="feature">
+                <div class="feature-icon">🔒</div>
+                Secure Google OAuth 2.0 authentication
+            </div>
+            <div class="feature">
+                <div class="feature-icon">📸</div>
+                Supports JPEG, PNG, GIF, WebP & more
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🔔</div>
+                Real-time upload notifications
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🛡️</div>
+                No data collected, fully private
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
