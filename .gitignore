@@ -6,6 +6,7 @@
 
 # 打包产物
 save-to-google-photos.zip
+release/
 
 # Live Photo 实验素材，含个人照片，不入库
 livephoto-test/source/
