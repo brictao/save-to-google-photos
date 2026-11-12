@@ -7,7 +7,7 @@ const path = require("path");
 const vm = require("vm");
 
 const contentSource = fs.readFileSync(
-  path.resolve(__dirname, "../content.js"),
+  path.resolve(__dirname, "../extension/content.js"),
   "utf8"
 );
 

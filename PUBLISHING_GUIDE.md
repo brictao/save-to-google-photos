@@ -4,7 +4,7 @@
 
 | 文件 | 用途 |
 |------|------|
-| `save-to-google-photos.zip` | 上传到 Chrome Web Store 的扩展包 |
+| `release/save-to-google-photos-x.y.z.zip` | 上传到 Chrome Web Store 的扩展包 |
 | `store-assets/screenshot1.png` | 商店截图 1 — 功能概览 (1280x800) |
 | `store-assets/screenshot2.png` | 商店截图 2 — Popup UI 展示 (1280x800) |
 | `PRIVACY_POLICY.md` | 隐私政策（必须提供） |
@@ -34,12 +34,12 @@
 4. 创建 **OAuth 2.0 凭据**:
    - Application type: **Chrome Extension**
    - ⚠️ 暂时留空 Extension ID，先上传扩展获取 ID
-5. 复制 Client ID，替换 `manifest.json` 中的 `YOUR_CLIENT_ID`
+5. 复制 Client ID，替换 `extension/manifest.json` 中的 `YOUR_CLIENT_ID`
 
 ### 3. 上传扩展
 
 1. 在 Developer Dashboard 点击 **New Item**
-2. 上传 `save-to-google-photos.zip`
+2. 上传 `release/` 目录下的 zip 包
 3. 填写商店信息:
 
 #### Store Listing 信息
@@ -125,8 +125,8 @@ Get real-time notifications when your image is saved successfully.
 - [ ] Photos Library API 已启用
 - [ ] OAuth 同意屏幕已配置
 - [ ] OAuth Client ID 已创建（Chrome Extension 类型）
-- [ ] `manifest.json` 中已填入正确的 Client ID
-- [ ] ZIP 包已生成（`save-to-google-photos.zip`）
+- [ ] `extension/manifest.json` 中已填入正确的 Client ID
+- [ ] ZIP 包已生成并放入 `release/`
 - [ ] 隐私政策已发布到公开 URL
 - [ ] 截图已准备好
 - [ ] Developer Dashboard 注册费已支付

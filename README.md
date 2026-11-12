@@ -39,7 +39,7 @@ A Chrome extension that lets you right-click any image on the web and save it di
    - Click **Create Credentials** → **OAuth client ID**
    - Application type: **Chrome Extension**
    - Enter your Extension ID (found in `chrome://extensions`)
-5. Copy the **Client ID** and replace `YOUR_CLIENT_ID` in `manifest.json`
+5. Copy the **Client ID** and replace `YOUR_CLIENT_ID` in `extension/manifest.json`
 6. Configure the **OAuth consent screen**:
    - Go to **APIs & Services** → **OAuth consent screen**
    - Add test users (your Google account email)
@@ -72,18 +72,23 @@ It then merges the JPEG still and the video into a single Google Motion Photo (`
 
 ```
 save-to-google-photo/
-├── manifest.json        # Extension configuration
-├── background.js        # Service worker (context menu + upload logic)
-├── content.js           # In-page toast + Live Photo video lookup
-├── motion-photo.js      # Motion Photo 1.0 assembly (byte-level, no re-encode)
-├── popup.html           # Popup UI
-├── popup.js             # Popup auth logic
-├── popup.css            # Popup styling
-├── icons/
-│   ├── icon16.png
-│   ├── icon48.png
-│   └── icon128.png
+├── extension/           # Load this folder in chrome://extensions
+│   ├── manifest.json    # Extension configuration
+│   ├── background.js    # Service worker (context menu + upload logic)
+│   ├── content.js       # In-page toast + Live Photo video lookup
+│   ├── motion-photo.js # Motion Photo 1.0 assembly (byte-level, no re-encode)
+│   ├── popup.html       # Popup UI
+│   ├── popup.js         # Popup auth logic
+│   ├── popup.css        # Popup styling
+│   └── icons/
+│       ├── icon16.png
+│       ├── icon48.png
+│       └── icon128.png
+├── release/             # Packaged zips (git-ignored)
+├── livephoto-test/      # Local verification scripts and fixtures
+├── store-assets/        # Chrome Web Store listing assets
 ├── PRIVACY_POLICY.md    # Privacy policy (required for Chrome Web Store)
+├── PUBLISHING_GUIDE.md  # Release checklist
 └── README.md            # This file
 ```
 

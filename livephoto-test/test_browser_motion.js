@@ -11,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-require(path.resolve(__dirname, "../motion-photo.js"));
+require(path.resolve(__dirname, "../extension/motion-photo.js"));
 const MP = self.MotionPhoto;
 
 const [, , primaryPath, videoPath, refPath] = process.argv;
