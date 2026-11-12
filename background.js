@@ -24,14 +24,14 @@ chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({
       id: LIVE_PHOTO_MENU_ID,
       title: "Save Live Photo to Google Photos",
-      contexts: ["image"],
+      contexts: ["image", "video"],
     });
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === LIVE_PHOTO_MENU_ID) {
-    await handleLivePhoto(tab, info.srcUrl);
+    await handleLivePhoto(tab, info.srcUrl, info.mediaType);
     return;
   }
 
@@ -185,44 +185,38 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // --------------------------------------------------
 // 6. Live Photo：找配套视频并合成 Motion Photo
 // --------------------------------------------------
-async function handleLivePhoto(tab, imageUrl) {
+async function handleLivePhoto(tab, srcUrl, mediaType) {
   const tabId = tab?.id;
-  if (!imageUrl) {
-    showToast(tabId, "error", "Error", "Could not determine image URL.");
+  if (!srcUrl) {
+    showToast(tabId, "error", "Error", "Could not determine the clicked URL.");
     return;
   }
 
   try {
-    showToast(tabId, "loading", "Looking for motion…", "Checking this page for a paired video.");
+    showToast(tabId, "loading", "Looking for the pair…", "Checking this page for the matching photo or video.");
 
-    // 1) 向页面询问配套视频
-    const source = await requestVideoSource(tabId, imageUrl);
-    const video = await resolveVideoBytes(source);
-    if (!video) {
-      throw new Error(
-        source.reason ||
-        "这个页面没有提供可用的动态视频。已尝试同名文件和页面视频元素。"
-      );
-    }
+    // 1) 确定主图与动态段，两个入口共用后续流程
+    const pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType);
 
     // 2) 拿授权
     const token = await getAuthToken(true);
 
-    // 3) 下载主图并合成
+    // 3) 下载主图、必要时转成 JPEG，再合成
     showToast(tabId, "loading", "Building Live Photo…", "Merging photo and motion into one file.");
-    const photoBytes = await fetchBytes(imageUrl);
+    const photoBytes = await fetchBytes(pair.imageUrl);
+    const jpegBytes = await ensureJpeg(photoBytes, pair.imageUrl);
     const result = self.MotionPhoto.assemble(
-      new Uint8Array(photoBytes),
-      new Uint8Array(video.bytes)
+      jpegBytes,
+      new Uint8Array(pair.videoBytes)
     );
 
-    const fileName = buildMotionPhotoName(imageUrl);
+    const fileName = buildMotionPhotoName(pair.imageUrl);
 
     // 4) 上传
     showToast(tabId, "loading", "Uploading…", "Saving Live Photo to Google Photos…");
     const blob = new Blob([result.bytes], { type: "image/jpeg" });
     const uploadToken = await uploadBytes(token, blob, "image/jpeg", fileName);
-    await createMediaItem(token, uploadToken, fileName, imageUrl);
+    await createMediaItem(token, uploadToken, fileName, pair.imageUrl);
 
     const note = result.warnings.length ? `（${result.warnings.join("；")}）` : "";
     showToast(
@@ -237,6 +231,45 @@ async function handleLivePhoto(tab, imageUrl) {
   }
 }
 
+// 根据右键入口返回 { imageUrl, videoBytes, via }
+async function resolveLivePhotoPair(tabId, srcUrl, mediaType) {
+  if (mediaType === "video") {
+    assertFetchable(srcUrl, "视频");
+
+    const cover = await requestCoverImage(tabId, srcUrl);
+    if (!cover) {
+      throw new Error("这个视频附近找不到可用的封面图，无法合成 Live Photo。");
+    }
+
+    const videoBytes = await fetchBytes(srcUrl);
+    if (!self.MotionPhoto.isMp4(new Uint8Array(videoBytes))) {
+      throw new Error(`视频不是 MP4 容器，Motion Photo 无法封装：${shortUrl(srcUrl)}`);
+    }
+
+    return { imageUrl: cover.imageUrl, videoBytes, via: cover.via };
+  }
+
+  const source = await requestVideoSource(tabId, srcUrl);
+  const video = await resolveVideoBytes(source);
+  if (!video) {
+    throw new Error(
+      source.reason ||
+      "这个页面没有提供可用的动态视频。已尝试同名文件和页面视频元素。"
+    );
+  }
+  return { imageUrl: srcUrl, videoBytes: video.bytes, via: video.url };
+}
+
+// blob: 与 m3u8 这类地址在扩展里拿不到完整文件，提前给出清楚的原因
+function assertFetchable(url, label) {
+  if (/^blob:/i.test(url)) {
+    throw new Error(`${label}使用的是 blob 地址，扩展无法读取原始文件。`);
+  }
+  if (/\.m3u8(\?|$)/i.test(url)) {
+    throw new Error(`${label}是 HLS 流，扩展无法直接下载完整文件。`);
+  }
+}
+
 function requestVideoSource(tabId, imageUrl) {
   const message = { action: "findLivePhotoVideo", imageUrl };
 
@@ -245,6 +278,41 @@ function requestVideoSource(tabId, imageUrl) {
       .executeScript({ target: { tabId }, files: ["content.js"] })
       .then(() => chrome.tabs.sendMessage(tabId, message))
   );
+}
+
+function requestCoverImage(tabId, videoUrl) {
+  const message = { action: "findLivePhotoCover", videoUrl };
+
+  return chrome.tabs.sendMessage(tabId, message).catch(() =>
+    chrome.scripting
+      .executeScript({ target: { tabId }, files: ["content.js"] })
+      .then(() => chrome.tabs.sendMessage(tabId, message))
+  );
+}
+
+// Motion Photo 的主图必须是 JPEG。非 JPEG 用 OffscreenCanvas 转码。
+async function ensureJpeg(bytes, url) {
+  const arr = new Uint8Array(bytes);
+  if (self.MotionPhoto.isJpeg(arr)) return arr;
+
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(new Blob([arr]));
+  } catch {
+    throw new Error(`封面图格式无法解码：${shortUrl(url)}`);
+  }
+
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close?.();
+
+  const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
+  const out = new Uint8Array(await jpegBlob.arrayBuffer());
+  if (!self.MotionPhoto.isJpeg(out)) {
+    throw new Error("封面图转码为 JPEG 失败");
+  }
+  return out;
 }
 
 async function fetchBytes(url) {

@@ -210,10 +210,12 @@
     // 记录右键位置的图片元素，供 Live Photo 查找配套视频使用
     // --------------------------------------------------
     let lastContextImage = null;
+    let lastContextVideo = null;
 
     document.addEventListener("contextmenu", (event) => {
         const target = event.target;
         lastContextImage = target && target.tagName === "IMG" ? target : null;
+        lastContextVideo = target && target.tagName === "VIDEO" ? target : null;
     }, true);
 
     function absoluteUrl(url) {
@@ -297,6 +299,62 @@
         return { found: false, reason: "既没有配套视频元素，也无法从图片地址推导视频地址" };
     }
 
+    // 在视频附近查找封面图
+    function findCoverForVideo(video) {
+        if (!video) return null;
+
+        // 1) poster 属性通常就是封面帧
+        const poster = absoluteUrl(video.getAttribute("poster"));
+        if (poster) return { url: poster, via: "video 的 poster 属性" };
+
+        // 2) 向上逐层找页面上的 img
+        let node = video;
+        for (let depth = 0; depth < 5 && node; depth++) {
+            const parent = node.parentElement;
+            if (!parent) break;
+
+            const images = Array.from(parent.querySelectorAll("img"));
+            const usable = images
+                .map((img) => ({
+                    url: absoluteUrl(img.currentSrc || img.src),
+                    area: (img.naturalWidth || 0) * (img.naturalHeight || 0),
+                }))
+                .filter((item) => item.url)
+                .sort((a, b) => b.area - a.area);
+
+            if (usable.length) {
+                return { url: usable[0].url, via: "video 附近的图片元素" };
+            }
+
+            node = parent;
+        }
+
+        return null;
+    }
+
+    // 从视频入口推导合成所需的封面图
+    function describeLivePhotoCover(videoUrl) {
+        const normalized = absoluteUrl(videoUrl);
+
+        let video = lastContextVideo;
+        if (!video || (normalized && absoluteUrl(video.currentSrc || video.src) !== normalized)) {
+            video = Array.from(document.querySelectorAll("video")).find(
+                (candidate) => absoluteUrl(candidate.currentSrc || candidate.src) === normalized
+            ) || lastContextVideo;
+        }
+
+        if (!video) {
+            return { found: false, reason: "页面上找不到这个视频元素" };
+        }
+
+        const cover = findCoverForVideo(video);
+        if (!cover) {
+            return { found: false, reason: "视频附近找不到可用的封面图" };
+        }
+
+        return { found: true, imageUrl: cover.url, videoUrl: normalized, via: cover.via };
+    }
+
     // --------------------------------------------------
     // Listen for messages from background service worker
     // --------------------------------------------------
@@ -309,6 +367,17 @@
             let result;
             try {
                 result = describeLivePhotoSource(request.imageUrl);
+            } catch (err) {
+                result = { found: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
+        }
+
+        if (request.action === "findLivePhotoCover") {
+            let result;
+            try {
+                result = describeLivePhotoCover(request.videoUrl);
             } catch (err) {
                 result = { found: false, reason: err.message || String(err) };
             }
