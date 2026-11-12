@@ -355,6 +355,91 @@
         return { found: true, imageUrl: cover.url, videoUrl: normalized, via: cover.via };
     }
 
+    // 从 React fiber 向上查找 Live Photo 数据。
+    // 部分站点（例如即刻）在预览态不给 video 设 src，地址只存在于组件数据里。
+    function readReactLivePhoto(el) {
+        if (!el) return null;
+
+        const fiberKey = Object.keys(el).find(
+            (key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
+        );
+        if (!fiberKey) return null;
+
+        let fiber = el[fiberKey];
+        let depth = 0;
+        while (fiber && depth < 40) {
+            const props = fiber.memoizedProps;
+            if (props && typeof props === "object") {
+                const candidates = [
+                    props.livePhoto,
+                    props.data,
+                    props.data?.livePhoto,
+                    props.pictureInfo?.livePhoto,
+                    props.media,
+                ];
+                for (const candidate of candidates) {
+                    if (candidate && typeof candidate.videoUrl === "string" && candidate.videoUrl) {
+                        return {
+                            videoUrl: absoluteUrl(candidate.videoUrl),
+                            imageUrl: absoluteUrl(candidate.imageUrl) || absoluteUrl(candidate.src),
+                        };
+                    }
+                }
+            }
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
+    // 用右键位置的元素解析配对信息，兼容视频没有 src 的站点
+    function describeLivePhotoFromContext() {
+        const video = lastContextVideo;
+        const image = lastContextImage;
+
+        // 1) video 自身的地址
+        let videoUrl = null;
+        if (video) {
+            videoUrl =
+                absoluteUrl(video.currentSrc) ||
+                absoluteUrl(video.getAttribute("src")) ||
+                absoluteUrl(video.querySelector("source")?.getAttribute("src"));
+        }
+
+        // 2) 组件数据里的地址
+        const react =
+            readReactLivePhoto(video) ||
+            readReactLivePhoto(video?.parentElement) ||
+            readReactLivePhoto(image) ||
+            readReactLivePhoto(image?.parentElement);
+
+        if (!videoUrl && react?.videoUrl) videoUrl = react.videoUrl;
+
+        // 3) 封面图
+        let imageUrl = react?.imageUrl || null;
+        if (!imageUrl && video) {
+            const cover = findCoverForVideo(video);
+            if (cover) imageUrl = cover.url;
+        }
+        if (!imageUrl && image) {
+            imageUrl = absoluteUrl(image.currentSrc || image.src);
+        }
+
+        if (!videoUrl) {
+            return { found: false, reason: "没有找到这个 Live Photo 的视频地址。" };
+        }
+        if (!imageUrl) {
+            return { found: false, reason: "没有找到这个 Live Photo 的封面图。" };
+        }
+
+        return {
+            found: true,
+            imageUrl,
+            videoUrl,
+            via: react ? "页面组件数据" : "页面元素",
+        };
+    }
+
     // --------------------------------------------------
     // Listen for messages from background service worker
     // --------------------------------------------------
@@ -378,6 +463,17 @@
             let result;
             try {
                 result = describeLivePhotoCover(request.videoUrl);
+            } catch (err) {
+                result = { found: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
+        }
+
+        if (request.action === "findLivePhotoFromContext") {
+            let result;
+            try {
+                result = describeLivePhotoFromContext();
             } catch (err) {
                 result = { found: false, reason: err.message || String(err) };
             }

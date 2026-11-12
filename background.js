@@ -187,7 +187,8 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // --------------------------------------------------
 async function handleLivePhoto(tab, srcUrl, mediaType) {
   const tabId = tab?.id;
-  if (!srcUrl) {
+  // 视频元素可能没有 src，地址在页面组件数据里，此时交给 content 解析
+  if (!srcUrl && mediaType !== "video") {
     showToast(tabId, "error", "Error", "Could not determine the clicked URL.");
     return;
   }
@@ -233,20 +234,44 @@ async function handleLivePhoto(tab, srcUrl, mediaType) {
 
 // 根据右键入口返回 { imageUrl, videoBytes, via }
 async function resolveLivePhotoPair(tabId, srcUrl, mediaType) {
+  // 两个入口都先问页面上下文。有的站点把视频地址放在组件数据里，
+  // 元素本身拿不到 src，只能靠这一层解析。
+  const ctx = await requestContextPair(tabId);
+  const fromContext = ctx && ctx.found ? ctx : null;
+
   if (mediaType === "video") {
-    assertFetchable(srcUrl, "视频");
+    const videoUrl = fromContext?.videoUrl || srcUrl;
+    if (!videoUrl) {
+      throw new Error(fromContext?.reason || "没有找到这个视频的播放地址。");
+    }
+    assertFetchable(videoUrl, "视频");
 
-    const cover = await requestCoverImage(tabId, srcUrl);
-    if (!cover) {
-      throw new Error("这个视频附近找不到可用的封面图，无法合成 Live Photo。");
+    let imageUrl = fromContext?.imageUrl || null;
+    let via = fromContext?.via || "页面元素";
+    if (!imageUrl) {
+      const cover = await requestCoverImage(tabId, videoUrl);
+      if (!cover) {
+        throw new Error("这个视频附近找不到可用的封面图，无法合成 Live Photo。");
+      }
+      imageUrl = cover.imageUrl;
+      via = cover.via;
     }
 
-    const videoBytes = await fetchBytes(srcUrl);
+    const videoBytes = await fetchBytes(videoUrl);
     if (!self.MotionPhoto.isMp4(new Uint8Array(videoBytes))) {
-      throw new Error(`视频不是 MP4 容器，Motion Photo 无法封装：${shortUrl(srcUrl)}`);
+      throw new Error(`视频不是 MP4 容器，Motion Photo 无法封装：${shortUrl(videoUrl)}`);
     }
 
-    return { imageUrl: cover.imageUrl, videoBytes, via: cover.via };
+    return { imageUrl, videoBytes, via };
+  }
+
+  // 图片入口：视频优先取页面数据，其次按元素和同名规则探测
+  if (fromContext?.videoUrl) {
+    assertFetchable(fromContext.videoUrl, "视频");
+    const videoBytes = await fetchBytes(fromContext.videoUrl);
+    if (self.MotionPhoto.isMp4(new Uint8Array(videoBytes))) {
+      return { imageUrl: srcUrl, videoBytes, via: fromContext.via };
+    }
   }
 
   const source = await requestVideoSource(tabId, srcUrl);
@@ -288,6 +313,20 @@ function requestCoverImage(tabId, videoUrl) {
       .executeScript({ target: { tabId }, files: ["content.js"] })
       .then(() => chrome.tabs.sendMessage(tabId, message))
   );
+}
+
+// 向页面索取右键位置的完整配对信息，失败时返回 null 而不是抛错
+function requestContextPair(tabId) {
+  const message = { action: "findLivePhotoFromContext" };
+
+  return chrome.tabs
+    .sendMessage(tabId, message)
+    .catch(() =>
+      chrome.scripting
+        .executeScript({ target: { tabId }, files: ["content.js"] })
+        .then(() => chrome.tabs.sendMessage(tabId, message))
+    )
+    .catch(() => null);
 }
 
 // Motion Photo 的主图必须是 JPEG。非 JPEG 用 OffscreenCanvas 转码。
