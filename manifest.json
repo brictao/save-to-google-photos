@@ -3,6 +3,7 @@
   "name": "Save to Google Photos",
   "version": "1.0.5",
   "description": "Right-click any image to save it directly to your Google Photos library.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1CHsOfzb1pBtkD10uy37z1bjYKiHURpEQDahQfb/BlgN7wYlB0bSIFaVIurmKVv1nA5UOPhmGnZOYyHRfoyz1y7zEJ4Onf3nCRST5A4hMwP3sV+auc9FGBx/GnCXrr4d8g+mdOIrVWl4J+M5Y+tWfDcg9z9T74sDZzE/V5JsYDIlOsFVLyd2b/cECAhgLEHaoU2jwQpj0LsHklQkMrg3x4us5GVlFoJdf0sivHAxs+CyhQAJWO3BIndGFfn7E5f5sF57QkEsZItpmSvjP9zJ3SPoaKw0WtJHMac11QaU/JxiUbehpiuKNPIlL6GT/rhjJ+VFSKewJkZQvQBXUJikmQIDAQAB",
   "permissions": [
     "contextMenus",
     "identity",
