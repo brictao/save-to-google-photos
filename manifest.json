@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Save to Google Photos",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Right-click any image to save it directly to your Google Photos library.",
   "permissions": [
     "contextMenus",

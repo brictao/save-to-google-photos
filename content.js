@@ -207,11 +207,113 @@
     }
 
     // --------------------------------------------------
+    // 记录右键位置的图片元素，供 Live Photo 查找配套视频使用
+    // --------------------------------------------------
+    let lastContextImage = null;
+
+    document.addEventListener("contextmenu", (event) => {
+        const target = event.target;
+        lastContextImage = target && target.tagName === "IMG" ? target : null;
+    }, true);
+
+    function absoluteUrl(url) {
+        if (!url) return null;
+        try {
+            return new URL(url, location.href).href;
+        } catch {
+            return null;
+        }
+    }
+
+    // 在图片附近查找动态视频
+    function findNearbyVideo(img) {
+        let node = img;
+        for (let depth = 0; depth < 5 && node; depth++) {
+            const parent = node.parentElement;
+            if (!parent) break;
+
+            const video = parent.querySelector("video");
+            if (video) {
+                const src =
+                    absoluteUrl(video.currentSrc) ||
+                    absoluteUrl(video.getAttribute("src")) ||
+                    absoluteUrl(video.querySelector("source")?.getAttribute("src"));
+                if (src) return src;
+            }
+
+            // 常见 Live Photo 站点把视频地址放在容器属性里
+            for (const attr of ["data-video", "data-video-src", "data-motion-photo", "data-live-photo"]) {
+                const value = parent.getAttribute?.(attr);
+                const url = absoluteUrl(value);
+                if (url) return url;
+            }
+
+            node = parent;
+        }
+        return null;
+    }
+
+    // 按同名规则推导可能的动态视频地址，由后台逐个探测
+    function guessVideoUrls(img) {
+        const src = absoluteUrl(img.currentSrc || img.src);
+        if (!src) return [];
+
+        const match = src.match(/^(.*)\.(heic|heif|jpe?g|png|webp|avif)(\?.*)?$/i);
+        if (!match) return [];
+
+        const [, base, , query = ""] = match;
+        const candidates = [];
+        for (const ext of ["MOV", "mov", "MP4", "mp4"]) {
+            candidates.push(`${base}.${ext}${query}`);
+        }
+        return candidates;
+    }
+
+    function describeLivePhotoSource(imageUrl) {
+        const normalized = absoluteUrl(imageUrl);
+
+        // 优先用在右键位置真实抓到的元素，其次按 URL 找页面上匹配的图片
+        let img = lastContextImage;
+        if (!img || (normalized && absoluteUrl(img.currentSrc || img.src) !== normalized)) {
+            img = Array.from(document.images).find(
+                (candidate) => absoluteUrl(candidate.currentSrc || candidate.src) === normalized
+            ) || lastContextImage;
+        }
+
+        if (!img) {
+            return { found: false, reason: "页面上找不到这张图片元素" };
+        }
+
+        const nearby = findNearbyVideo(img);
+        if (nearby) {
+            return { found: true, videoUrl: nearby, via: "页面上的视频元素或容器属性" };
+        }
+
+        const guesses = guessVideoUrls(img);
+        if (guesses.length) {
+            return { found: false, candidates: guesses, via: "同名文件推导" };
+        }
+
+        return { found: false, reason: "既没有配套视频元素，也无法从图片地址推导视频地址" };
+    }
+
+    // --------------------------------------------------
     // Listen for messages from background service worker
     // --------------------------------------------------
-    chrome.runtime.onMessage.addListener((request) => {
+    chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         if (request.action === "showToast") {
             createToast(request.type, request.title, request.message);
+        }
+
+        if (request.action === "findLivePhotoVideo") {
+            let result;
+            try {
+                result = describeLivePhotoSource(request.imageUrl);
+            } catch (err) {
+                result = { found: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
         }
     });
 })();

@@ -9,6 +9,7 @@ A Chrome extension that lets you right-click any image on the web and save it di
 - 🔔 **Notifications** — Get instant feedback on upload status
 - 🎨 **Premium UI** — Dark glassmorphism popup for auth management
 - 📷 **Wide format support** — JPEG, PNG, GIF, WebP, and more
+- 🎞️ **Live Photo support** — Merges a page's photo and its paired video into one Google Motion Photo file, without re-encoding
 
 ## Installation
 
@@ -51,12 +52,30 @@ A Chrome extension that lets you right-click any image on the web and save it di
 3. Select **Save to Google Photos**
 4. A notification will confirm the upload
 
+### Saving a Live Photo
+
+Right-click the still image and choose **Save Live Photo to Google Photos**. The extension looks for the paired video in two ways:
+
+1. A `<video>` element (or `data-video` style attribute) near the image
+2. A same-named file next to the image, e.g. `IMG_4038.jpg` → `IMG_4038.MOV`
+
+It then merges the JPEG still and the video into a single Google Motion Photo (`*.MP.jpg`) and uploads it. The video bytes are copied as-is, so the motion segment is not re-encoded.
+
+**Requirements and limits:**
+
+- The still image must be JPEG. HEIC stills cannot be decoded by Chrome, so those pages usually need to be reached through a client that already converts them.
+- The video must be an MP4/MOV container. If `moov` sits at the end of the file, it is relocated to the front so the motion segment is streamable.
+- H.264 motion segments were verified end-to-end against the Google Photos API. HEVC segments are packaged the same way but have not been verified against Google Photos.
+- The extension never modifies or uploads the page's original files; everything happens on the fetched bytes.
+
 ## Project Structure
 
 ```
 save-to-google-photo/
 ├── manifest.json        # Extension configuration
 ├── background.js        # Service worker (context menu + upload logic)
+├── content.js           # In-page toast + Live Photo video lookup
+├── motion-photo.js      # Motion Photo 1.0 assembly (byte-level, no re-encode)
 ├── popup.html           # Popup UI
 ├── popup.js             # Popup auth logic
 ├── popup.css            # Popup styling

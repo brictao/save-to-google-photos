@@ -2,24 +2,39 @@
 // Save to Google Photos — Background Service Worker
 // ============================================================
 
+importScripts("motion-photo.js");
+
 const GOOGLE_PHOTOS_UPLOAD_URL =
   "https://photoslibrary.googleapis.com/v1/uploads";
 const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
 const CONTEXT_MENU_ID = "save-to-google-photos";
+const LIVE_PHOTO_MENU_ID = "save-live-photo-to-google-photos";
 
 // --------------------------------------------------
 // 1. Context Menu
 // --------------------------------------------------
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: CONTEXT_MENU_ID,
-    title: "Save to Google Photos",
-    contexts: ["image"],
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_ID,
+      title: "Save to Google Photos",
+      contexts: ["image"],
+    });
+    chrome.contextMenus.create({
+      id: LIVE_PHOTO_MENU_ID,
+      title: "Save Live Photo to Google Photos",
+      contexts: ["image"],
+    });
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === LIVE_PHOTO_MENU_ID) {
+    await handleLivePhoto(tab, info.srcUrl);
+    return;
+  }
+
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
 
   const tabId = tab?.id;
@@ -168,7 +183,130 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 }
 
 // --------------------------------------------------
-// 6. In-page toast notifications (via content script)
+// 6. Live Photo：找配套视频并合成 Motion Photo
+// --------------------------------------------------
+async function handleLivePhoto(tab, imageUrl) {
+  const tabId = tab?.id;
+  if (!imageUrl) {
+    showToast(tabId, "error", "Error", "Could not determine image URL.");
+    return;
+  }
+
+  try {
+    showToast(tabId, "loading", "Looking for motion…", "Checking this page for a paired video.");
+
+    // 1) 向页面询问配套视频
+    const source = await requestVideoSource(tabId, imageUrl);
+    const video = await resolveVideoBytes(source);
+    if (!video) {
+      throw new Error(
+        source.reason ||
+        "这个页面没有提供可用的动态视频。已尝试同名文件和页面视频元素。"
+      );
+    }
+
+    // 2) 拿授权
+    const token = await getAuthToken(true);
+
+    // 3) 下载主图并合成
+    showToast(tabId, "loading", "Building Live Photo…", "Merging photo and motion into one file.");
+    const photoBytes = await fetchBytes(imageUrl);
+    const result = self.MotionPhoto.assemble(
+      new Uint8Array(photoBytes),
+      new Uint8Array(video.bytes)
+    );
+
+    const fileName = buildMotionPhotoName(imageUrl);
+
+    // 4) 上传
+    showToast(tabId, "loading", "Uploading…", "Saving Live Photo to Google Photos…");
+    const blob = new Blob([result.bytes], { type: "image/jpeg" });
+    const uploadToken = await uploadBytes(token, blob, "image/jpeg", fileName);
+    await createMediaItem(token, uploadToken, fileName, imageUrl);
+
+    const note = result.warnings.length ? `（${result.warnings.join("；")}）` : "";
+    showToast(
+      tabId,
+      "success",
+      "Live Photo Saved!",
+      `静态图 ${formatBytes(result.stillSize)} + 动态 ${formatBytes(result.videoSize)}${note}`
+    );
+  } catch (err) {
+    console.error("[Save to Google Photos] Live Photo", err);
+    showToast(tabId, "error", "Live Photo Failed", err.message || String(err));
+  }
+}
+
+function requestVideoSource(tabId, imageUrl) {
+  const message = { action: "findLivePhotoVideo", imageUrl };
+
+  return chrome.tabs.sendMessage(tabId, message).catch(() =>
+    chrome.scripting
+      .executeScript({ target: { tabId }, files: ["content.js"] })
+      .then(() => chrome.tabs.sendMessage(tabId, message))
+  );
+}
+
+async function fetchBytes(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download ${shortUrl(url)} (HTTP ${response.status})`);
+  }
+  return response.arrayBuffer();
+}
+
+// 返回 { bytes } 或 null。先试页面给出的地址，再逐个探测同名候选。
+async function resolveVideoBytes(source) {
+  if (!source) return null;
+
+  const urls = [];
+  if (source.found && source.videoUrl) urls.push(source.videoUrl);
+  if (Array.isArray(source.candidates)) urls.push(...source.candidates);
+
+  for (const url of urls.slice(0, 6)) {
+    try {
+      const bytes = await fetchBytes(url);
+      if (self.MotionPhoto.isMp4(new Uint8Array(bytes))) {
+        return { bytes, url };
+      }
+    } catch (err) {
+      console.warn("[Save to Google Photos] 候选视频不可用", url, err);
+    }
+  }
+  return null;
+}
+
+function buildMotionPhotoName(url) {
+  let name = "photo";
+  try {
+    const last = new URL(url).pathname.split("/").filter(Boolean).pop();
+    if (last) name = decodeURIComponent(last);
+  } catch {
+    // 忽略，用默认名
+  }
+
+  name = name.split("?")[0];
+  const base = name.replace(/\.[^.]+$/, "");
+  return `${base || "photo"}.MP.jpg`;
+}
+
+function shortUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host}${parsed.pathname}`.slice(0, 80);
+  } catch {
+    return String(url).slice(0, 80);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// --------------------------------------------------
+// 7. In-page toast notifications (via content script)
 // --------------------------------------------------
 function showToast(tabId, type, title, message) {
   if (!tabId) return;
@@ -194,7 +332,7 @@ function showToast(tabId, type, title, message) {
 }
 
 // --------------------------------------------------
-// 7. Message handler for popup communication
+// 8. Message handler for popup communication
 // --------------------------------------------------
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === "getAuthToken") {
