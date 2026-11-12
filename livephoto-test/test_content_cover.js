@@ -83,6 +83,7 @@ function runCase(name, { tree, videoUrl, fireContextMenuOn }, assertion) {
   const chrome = {
     runtime: {
       onMessage: { addListener(fn) { listeners.push(fn); } },
+      sendMessage: () => Promise.resolve({ ok: true }),
       lastError: null,
     },
   };

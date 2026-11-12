@@ -9,54 +9,68 @@ const GOOGLE_PHOTOS_UPLOAD_URL =
 const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
 const CONTEXT_MENU_ID = "save-to-google-photos";
-const LIVE_PHOTO_MENU_ID = "save-live-photo-to-google-photos";
 
 // --------------------------------------------------
 // 1. Context Menu
 // --------------------------------------------------
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
+    // 只保留一个顶层菜单项。多个顶层项会被 Chrome 折叠成二级菜单，
+    // 这里用单一入口，标题按右键目标切换，点击后自动判断走哪条路。
     chrome.contextMenus.create({
       id: CONTEXT_MENU_ID,
       title: "Save to Google Photos",
-      contexts: ["image"],
-    });
-    chrome.contextMenus.create({
-      id: LIVE_PHOTO_MENU_ID,
-      title: "Save Live Photo to Google Photos",
       contexts: ["image", "video"],
     });
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === LIVE_PHOTO_MENU_ID) {
-    await handleLivePhoto(tab, info.srcUrl, info.mediaType);
-    return;
-  }
-
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
+  await handleSave(tab, info.srcUrl, info.mediaType);
+});
 
+// 切换标签页时把标题恢复默认，避免残留上一个页面的文案
+chrome.tabs.onActivated.addListener(() => {
+  chrome.contextMenus.update(CONTEXT_MENU_ID, { title: "Save to Google Photos" }, () => {
+    void chrome.runtime.lastError;
+  });
+});
+
+async function handleSave(tab, srcUrl, mediaType) {
   const tabId = tab?.id;
-  const imageUrl = info.srcUrl;
-  if (!imageUrl) {
-    showToast(tabId, "error", "Error", "Could not determine image URL.");
+  if (!srcUrl && mediaType !== "video") {
+    showToast(tabId, "error", "Error", "Could not determine the clicked URL.");
     return;
   }
 
+  // 先确认页面上有没有 Live Photo 配对，再决定走合成还是普通上传
+  const ctx = await requestContextPair(tabId);
+  if (ctx && ctx.found && ctx.videoUrl) {
+    await handleLivePhoto(tab, srcUrl, mediaType, ctx);
+    return;
+  }
+
+  if (mediaType === "video") {
+    showToast(
+      tabId,
+      "error",
+      "Not a Live Photo",
+      "这个视频没有配套的封面图，无法作为 Live Photo 保存。"
+    );
+    return;
+  }
+
+  await handleSingleImage(tabId, srcUrl);
+}
+
+async function handleSingleImage(tabId, imageUrl) {
   try {
     showToast(tabId, "loading", "Uploading…", "Saving image to Google Photos…");
 
-    // 1) Get OAuth token
-    const token = await getAuthToken(/* interactive */ true);
-
-    // 2) Download image bytes
+    const token = await getAuthToken(true);
     const { blob, mimeType, fileName } = await downloadImage(imageUrl);
-
-    // 3) Upload bytes → get upload token
     const uploadToken = await uploadBytes(token, blob, mimeType, fileName);
-
-    // 4) Create media item
     await createMediaItem(token, uploadToken, fileName, imageUrl);
 
     showToast(tabId, "success", "Saved!", "Image saved to Google Photos");
@@ -64,7 +78,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     console.error("[Save to Google Photos]", err);
     showToast(tabId, "error", "Upload Failed", err.message || String(err));
   }
-});
+}
 
 // --------------------------------------------------
 // 2. Auth helpers
@@ -185,7 +199,7 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // --------------------------------------------------
 // 6. Live Photo：找配套视频并合成 Motion Photo
 // --------------------------------------------------
-async function handleLivePhoto(tab, srcUrl, mediaType) {
+async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
   const tabId = tab?.id;
   // 视频元素可能没有 src，地址在页面组件数据里，此时交给 content 解析
   if (!srcUrl && mediaType !== "video") {
@@ -197,7 +211,7 @@ async function handleLivePhoto(tab, srcUrl, mediaType) {
     showToast(tabId, "loading", "Looking for the pair…", "Checking this page for the matching photo or video.");
 
     // 1) 确定主图与动态段，两个入口共用后续流程
-    const pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType);
+    const pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx);
 
     // 2) 拿授权
     const token = await getAuthToken(true);
@@ -233,10 +247,8 @@ async function handleLivePhoto(tab, srcUrl, mediaType) {
 }
 
 // 根据右键入口返回 { imageUrl, videoBytes, via }
-async function resolveLivePhotoPair(tabId, srcUrl, mediaType) {
-  // 两个入口都先问页面上下文。有的站点把视频地址放在组件数据里，
-  // 元素本身拿不到 src，只能靠这一层解析。
-  const ctx = await requestContextPair(tabId);
+async function resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx) {
+  // 页面上下文由调用方传入，避免同一流程里重复请求
   const fromContext = ctx && ctx.found ? ctx : null;
 
   if (mediaType === "video") {
@@ -474,6 +486,18 @@ function showToast(tabId, type, title, message) {
 // 8. Message handler for popup communication
 // --------------------------------------------------
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (request.action === "setMenuMode") {
+    const title =
+      request.mode === "live"
+        ? "Save Live Photo to Google Photos"
+        : "Save to Google Photos";
+    chrome.contextMenus.update(CONTEXT_MENU_ID, { title }, () => {
+      void chrome.runtime.lastError;
+    });
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (request.action === "getAuthToken") {
     getAuthToken(request.interactive)
       .then((token) => sendResponse({ success: true, token }))

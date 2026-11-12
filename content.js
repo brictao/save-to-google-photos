@@ -226,10 +226,32 @@
     let lastContextImage = null;
     let lastContextVideo = null;
 
+    // 根据右键目标通知后台切换菜单文案。
+    // 菜单只有一个入口，文案只影响显示，点下去仍会自动判断类型。
+    function syncMenuMode() {
+        let live = false;
+        try {
+            live = Boolean(
+                (lastContextVideo &&
+                    (readReactLivePhoto(lastContextVideo) ||
+                        absoluteUrl(lastContextVideo.currentSrc) ||
+                        absoluteUrl(lastContextVideo.getAttribute("src")))) ||
+                (lastContextImage && readReactLivePhoto(lastContextImage))
+            );
+        } catch {
+            live = false;
+        }
+
+        chrome.runtime
+            .sendMessage({ action: "setMenuMode", mode: live ? "live" : "photo" })
+            .catch(() => { });
+    }
+
     document.addEventListener("contextmenu", (event) => {
         const target = event.target;
         lastContextImage = target && target.tagName === "IMG" ? target : null;
         lastContextVideo = target && target.tagName === "VIDEO" ? target : null;
+        syncMenuMode();
     }, true);
 
     function absoluteUrl(url) {
