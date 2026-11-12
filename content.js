@@ -141,8 +141,10 @@
     // Toast creation
     // --------------------------------------------------
     function createToast(type, title, message, autoDismiss = true) {
-        // Remove loading toast if showing a result
-        if (type !== "loading" && currentLoadingToast) {
+        // 每次出现新提示都先清掉上一条 loading。
+        // 多步流程会连续创建多条 loading，只保留最新一条，
+        // 否则旧的加载卡片会一直堆在页面上。
+        if (currentLoadingToast) {
             dismissToast(currentLoadingToast);
             currentLoadingToast = null;
         }
@@ -185,6 +187,14 @@
 
         if (type === "loading") {
             currentLoadingToast = toast;
+
+            // 兜底：后台异常中断时不要让加载卡片永久停留
+            setTimeout(() => {
+                if (currentLoadingToast === toast) {
+                    dismissToast(toast);
+                    currentLoadingToast = null;
+                }
+            }, 180000);
         }
 
         // Auto dismiss
