@@ -226,32 +226,53 @@
     let lastContextImage = null;
     let lastContextVideo = null;
 
-    // 根据右键目标通知后台切换菜单文案。
-    // 菜单只有一个入口，文案只影响显示，点下去仍会自动判断类型。
-    function syncMenuMode() {
-        let live = false;
+    // 判断某个元素应该对应哪种菜单文案
+    function menuModeOf(el) {
+        if (!el) return "photo";
         try {
-            live = Boolean(
-                (lastContextVideo &&
-                    (readReactLivePhoto(lastContextVideo) ||
-                        absoluteUrl(lastContextVideo.currentSrc) ||
-                        absoluteUrl(lastContextVideo.getAttribute("src")))) ||
-                (lastContextImage && readReactLivePhoto(lastContextImage))
-            );
+            if (el.tagName === "VIDEO") {
+                const hasSource =
+                    readReactLivePhoto(el) ||
+                    absoluteUrl(el.currentSrc) ||
+                    absoluteUrl(el.getAttribute("src"));
+                return hasSource ? "live" : "photo";
+            }
+            if (el.tagName === "IMG") {
+                return readReactLivePhoto(el) ? "live" : "photo";
+            }
         } catch {
-            live = false;
+            // 解析失败时按普通图片处理
         }
+        return "photo";
+    }
 
+    let publishedMode = null;
+    let lastHoverTarget = null;
+
+    function publishMenuMode(el) {
+        const mode = menuModeOf(el);
+        if (mode === publishedMode) return;
+        publishedMode = mode;
         chrome.runtime
-            .sendMessage({ action: "setMenuMode", mode: live ? "live" : "photo" })
+            .sendMessage({ action: "setMenuMode", mode })
             .catch(() => { });
     }
+
+    // 鼠标进入图片时就预判。右键那一刻菜单已经开始渲染，
+    // 等到 contextmenu 再更新会慢一拍，第一次总是显示上一次的文案。
+    document.addEventListener("mouseover", (event) => {
+        const target = event.target;
+        if (!target || (target.tagName !== "IMG" && target.tagName !== "VIDEO")) return;
+        if (target === lastHoverTarget) return;
+        lastHoverTarget = target;
+        publishMenuMode(target);
+    }, true);
 
     document.addEventListener("contextmenu", (event) => {
         const target = event.target;
         lastContextImage = target && target.tagName === "IMG" ? target : null;
         lastContextVideo = target && target.tagName === "VIDEO" ? target : null;
-        syncMenuMode();
+        publishMenuMode(target);
     }, true);
 
     function absoluteUrl(url) {
