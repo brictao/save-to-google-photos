@@ -55,6 +55,9 @@ function makeEl(tag, attrs = {}) {
     getAttribute(name) {
       return this.attrs[name] ?? null;
     },
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
     addEventListener() {},
   };
 }

@@ -38,6 +38,7 @@ function makeEl(tag, attrs = {}) {
     },
     querySelectorAll() { return []; },
     getAttribute(name) { return this.attrs[name] ?? null; },
+    setAttribute(name, value) { this.attrs[name] = value; },
     addEventListener() {},
   };
 }
@@ -63,6 +64,7 @@ function runCase(name, { images, imageUrl, wire }, assertion) {
     documentElement: htmlElement,
     images,
     createElement: (tag) => makeEl(tag),
+    querySelectorAll: () => [],
     addEventListener() {},
   };
 

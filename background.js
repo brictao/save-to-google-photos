@@ -354,12 +354,26 @@ async function ensureJpeg(bytes, url) {
   return out;
 }
 
-async function fetchBytes(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download ${shortUrl(url)} (HTTP ${response.status})`);
+async function fetchBytes(url, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Failed to download ${shortUrl(url)} (HTTP ${response.status})`);
+    }
+    return await response.arrayBuffer();
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(
+        `下载超时（${Math.round(timeoutMs / 1000)} 秒）：${shortUrl(url)}`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.arrayBuffer();
 }
 
 // 返回 { bytes } 或 null。先试页面给出的地址，再逐个探测同名候选。
@@ -417,24 +431,42 @@ function formatBytes(bytes) {
 // --------------------------------------------------
 function showToast(tabId, type, title, message) {
   if (!tabId) return;
-  chrome.tabs.sendMessage(tabId, {
-    action: "showToast",
-    type,
-    title,
-    message,
-  }).catch(() => {
-    // Content script might not be injected yet, try to inject it
-    chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"],
-    }).then(() => {
-      chrome.tabs.sendMessage(tabId, {
-        action: "showToast",
-        type,
-        title,
-        message,
-      }).catch(() => { });
-    }).catch(() => { });
+
+  const payload = { action: "showToast", type, title, message };
+
+  chrome.tabs.sendMessage(tabId, payload).catch(() => {
+    // 内容脚本可能已经和扩展断开，注入新实例后再试一次
+    chrome.scripting
+      .executeScript({ target: { tabId }, files: ["content.js"] })
+      .then(() => chrome.tabs.sendMessage(tabId, payload))
+      .catch(() => {
+        // 消息通道彻底不可用时，直接在页面里渲染提示，避免界面停在转圈
+        chrome.scripting
+          .executeScript({
+            target: { tabId },
+            func: (kind, text, detail) => {
+              const palette = {
+                loading: "#4285f4",
+                success: "#34a853",
+                error: "#ea4335",
+              };
+              const box = document.createElement("div");
+              box.setAttribute("data-sgp-fallback", "1");
+              box.textContent = detail ? `${text}｜${detail}` : text;
+              box.style.cssText = [
+                "position:fixed", "top:20px", "right:20px", "z-index:2147483647",
+                `background:${palette[kind] || "#333"}`, "color:#fff",
+                "padding:12px 18px", "border-radius:10px", "max-width:380px",
+                "font:13px/1.5 -apple-system,system-ui,sans-serif",
+                "box-shadow:0 8px 24px rgba(0,0,0,.3)", "word-break:break-word",
+              ].join(";");
+              document.documentElement.appendChild(box);
+              setTimeout(() => box.remove(), kind === "loading" ? 15000 : 6000);
+            },
+            args: [type, title, message],
+          })
+          .catch(() => {});
+      });
   });
 }
 

@@ -3,14 +3,18 @@
 // ============================================================
 
 (() => {
-    // Prevent double-injection
-    if (window.__saveToGooglePhotosToast) return;
+    // 扩展重载后，页面上旧版本的 content script 会与扩展断开连接，
+    // 但它的 window 标记仍然存在。不能因为标记存在就退出，否则新实例
+    // 永远无法接管页面，消息也没有任何监听器回应。
+    document.querySelectorAll(".sgp-toast-container").forEach((el) => el.remove());
+    document.querySelectorAll("style[data-sgp-style]").forEach((el) => el.remove());
     window.__saveToGooglePhotosToast = true;
 
     // --------------------------------------------------
     // Inject styles
     // --------------------------------------------------
     const style = document.createElement("style");
+    style.setAttribute("data-sgp-style", "1");
     style.textContent = `
     .sgp-toast-container {
       position: fixed;
