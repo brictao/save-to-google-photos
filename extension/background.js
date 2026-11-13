@@ -561,11 +561,8 @@ function assertImageUrl(url) {
 }
 
 function assertFetchable(url, label) {
-  if (/^blob:/i.test(url)) {
-    throw new Error(
-      `The ${label} uses a blob URL, so the extension cannot read the original file.`
-    );
-  }
+  // blob: 只对创建它的页面有效。扩展进程读不到，页面上下文可以尝试，
+  // 所以不在这里直接拒绝，交给 fetchBytes 走页面回退。
   if (/\.m3u8(\?|$)/i.test(url)) {
     throw new Error(
       `The ${label} is an HLS stream, so the extension cannot download the full file.`
@@ -663,28 +660,45 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // --------------------------------------------------
 // 7. Live Photo：找配套视频并合成 Motion Photo
 // --------------------------------------------------
-async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
+async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
   const tabId = tab?.id;
+  const quiet = options.quiet === true;
+  const report = (...args) => { if (!quiet) showToast(...args); };
   // 视频元素可能没有 src，地址在页面组件数据里，此时交给 content 解析
   if (!srcUrl && mediaType !== "video") {
-    showToast(tabId, "error", "Error", "Could not determine the clicked URL.");
-    return;
+    report(tabId, "error", "Error", "Could not determine the clicked URL.");
+    return "failed";
   }
 
   try {
-    showToast(tabId, "loading", "Looking for the pair…", "Checking this page for the matching photo or video.");
+    report(tabId, "loading", "Looking for the pair…", "Checking this page for the matching photo or video.");
 
     // 1) 确定主图与动态段，两个入口共用后续流程
-    const pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx);
+    let pair;
+    try {
+      pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx);
+    } catch (err) {
+      // 动态段是 blob 且页面也读不到时，封面通常仍然可用，退回只保存封面
+      if (isCoverFallbackError(err, ctx)) {
+        report(
+          tabId,
+          "loading",
+          "Saving cover only…",
+          "The motion clip could not be read, so the cover image is saved instead."
+        );
+        return saveOne(tabId, ctx.imageUrl, "image", { quiet });
+      }
+      throw err;
+    }
 
     // 2) 下载主图、必要时转成 JPEG，再合成
-    showToast(tabId, "loading", "Building Live Photo…", "Merging photo and motion into one file.");
+    report(tabId, "loading", "Building Live Photo…", "Merging photo and motion into one file.");
     const photo = await fetchBytes(pair.imageUrl, tabId, (received, total) => {
       const detail =
         total > 0
           ? `${formatBytes(received)} of ${formatBytes(total)} (${Math.round((received / total) * 100)}%)`
           : `${formatBytes(received)} downloaded`;
-      showToast(tabId, "loading", "Downloading cover image…", detail);
+      report(tabId, "loading", "Downloading cover image…", detail);
     });
     const jpegBytes = await ensureJpeg(photo.bytes, pair.imageUrl, tabId);
     const result = self.MotionPhoto.assemble(
@@ -702,13 +716,13 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
         url: shortUrl(pair.imageUrl),
         message: "Already uploaded from this source.",
       });
-      showToast(
+      report(
         tabId,
         "success",
         "Already saved",
         "This Live Photo was uploaded before, skipped to avoid a duplicate."
       );
-      return;
+      return "skipped";
     }
 
     const fileName = buildMotionPhotoName(pair.imageUrl);
@@ -716,7 +730,7 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
     // 3) 上传。合成结果同样受 Google 的单文件上限约束，在本地先拦一道
     const size = result.bytes.byteLength;
     assertUploadable({ size, mimeType: "image/jpeg" }, "image");
-    showToast(
+    report(
       tabId,
       "loading",
       `Uploading ${formatBytes(size)}…`,
@@ -738,12 +752,13 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
     });
 
     const note = result.warnings.length ? ` (${result.warnings.join("; ")})` : "";
-    showToast(
+    report(
       tabId,
       "success",
       "Live Photo Saved!",
       `Still ${formatBytes(result.stillSize)} + motion ${formatBytes(result.videoSize)}${note}`
     );
+    return "saved";
   } catch (err) {
     console.error("[Save to Google Photos] Live Photo", err);
     const message = err.message || String(err);
@@ -754,9 +769,17 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
       url: shortUrl(srcUrl),
       message,
     });
-    showToast(tabId, "error", "Live Photo Failed", message);
-    notifyFailure("Could not save Live Photo", message);
+    report(tabId, "error", "Live Photo Failed", message);
+    if (!quiet) notifyFailure("Could not save Live Photo", message);
+    return "failed";
   }
+}
+
+// 动态段取不到但封面可用时，允许降级保存封面
+function isCoverFallbackError(err, ctx) {
+  const cover = ctx?.imageUrl;
+  if (!cover || !/^https?:/i.test(cover)) return false;
+  return /blob|failed to fetch|network error|could not be downloaded|not an MP4 container/i.test(err?.message || "");
 }
 
 // 根据右键入口返回 { imageUrl, videoBytes, via }
@@ -899,6 +922,8 @@ function jpegVariantOf(url) {
 }
 
 async function fetchBytes(url, tabId, onProgress) {
+  // blob: 由页面自己创建，扩展进程的 fetch 必然失败，直接走页面上下文
+  if (/^blob:/i.test(url)) return fetchViaPage(tabId, url);
   try {
     const result = await fetchWithProgress(url, onProgress);
     return result;
@@ -995,7 +1020,7 @@ async function runBatch(tabId, entries, emptyMessage) {
       tabId,
       "loading",
       `Saving ${i + 1} of ${entries.length}…`,
-      "Uploading the images found on this page."
+      "Uploading the selected images, videos and Live Photos."
     );
     const outcome = await saveWithCandidates(tabId, entries[i]);
     counts[outcome] = (counts[outcome] || 0) + 1;
@@ -1018,27 +1043,32 @@ async function runBatch(tabId, entries, emptyMessage) {
     await notifyFailureWhenHidden(
       tabId,
       "Batch finished with errors",
-      `${counts.failed} of ${counts.total} images could not be uploaded.`
+      `${counts.failed} of ${counts.total} items could not be uploaded.`
     );
   }
 
   return counts;
 }
 
-// 用户在选择面板里勾选后提交的图片
+// 用户在选择面板里勾选后提交的媒体，保留每张卡片的配对和时长快照。
 async function saveSelectedItems(tabId, items) {
   const entries = (Array.isArray(items) ? items : [])
-    .filter((item) => item && typeof item.url === "string")
+    .filter((item) => item && typeof item.url === "string" && !item.unavailableReason)
     .slice(0, 60)
     .map((item) => ({
       url: item.url,
+      kind: item.kind === "live" || item.kind === "video"
+        ? (typeof item.imageUrl === "string" && item.imageUrl && !isLongVideo(item.videoDuration) ? "live" : "video")
+        : "image",
+      imageUrl: typeof item.imageUrl === "string" ? item.imageUrl : "",
+      videoDuration: Number.isFinite(item.videoDuration) ? item.videoDuration : undefined,
       candidates:
         Array.isArray(item.candidates) && item.candidates.length
           ? item.candidates
           : [item.url],
     }));
 
-  return runBatch(tabId, entries, "No images were selected.");
+  return runBatch(tabId, entries, "No media were selected.");
 }
 
 function delay(ms) {
@@ -1070,6 +1100,13 @@ function normalizeBatchEntries(listed, limit) {
 async function saveWithCandidates(tabId, entry, options = {}) {
   // 批量模式靠外层汇总，默认静默；单张右键需要进度和结果提示
   const quiet = options.quiet !== false;
+  if (entry.kind === "live") {
+    return handleLivePhoto({ id: tabId }, entry.url, "video", {
+      found: true, videoUrl: entry.url, imageUrl: entry.imageUrl,
+      videoDuration: entry.videoDuration, via: "media picker",
+    }, { quiet });
+  }
+  if (entry.kind === "video") return saveOne(tabId, entry.url, "video", { quiet });
   const candidates = (
     Array.isArray(entry.candidates) && entry.candidates.length
       ? entry.candidates

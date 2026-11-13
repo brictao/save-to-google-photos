@@ -474,8 +474,11 @@
 
     // 用右键位置的元素解析配对信息，兼容视频没有 src 的站点
     function describeLivePhotoFromContext() {
-        const video = lastContextVideo;
-        const image = lastContextImage;
+        return describeMediaElements(lastContextVideo, lastContextImage);
+    }
+
+    // 右键和选择面板共用元素解析，面板不依赖上一次右键的位置。
+    function describeMediaElements(video, image) {
 
         // 1) video 自身的地址
         let videoUrl = null;
@@ -505,19 +508,13 @@
             imageUrl = absoluteUrl(image.currentSrc || image.src);
         }
 
-        if (!videoUrl) {
-            return { found: false, reason: "No video URL was found for this Live Photo." };
-        }
-        if (!imageUrl) {
-            return { found: false, reason: "No cover image was found for this Live Photo." };
-        }
-
         return {
-            found: true,
+            found: Boolean(videoUrl && imageUrl),
+            reason: !videoUrl ? "No video URL was found for this Live Photo." :
+                !imageUrl ? "No cover image was found for this Live Photo." : undefined,
             imageUrl,
             videoUrl,
-            // 交给后台按实际时长区分 Live Photo 和普通视频。
-            // 直播流的 duration 是 Infinity，这里一并过滤掉。
+            // 时长未知时保留旧的封面判定规则。
             videoDuration: Number.isFinite(video?.duration) ? video.duration : undefined,
             via: react ? "页面组件数据" : "页面元素",
         };
@@ -530,10 +527,8 @@
     const PAGE_FALLBACK_MAX_BYTES = 25 * 1024 * 1024;
 
     async function fetchAsBase64(url) {
-        if (/^blob:/i.test(url)) {
-            return { ok: false, error: "blob URL" };
-        }
-
+        // blob: 由页面创建，只有页面上下文能读到。这里不再拒绝，
+        // 让 Live Photo 的动态段有机会被完整取出。
         let response;
         try {
             response = await fetch(url, { credentials: "include" });
@@ -780,8 +775,11 @@
 
     // 小红书详情是页内浮层，打开后浮层里只有当前一张大图，背后的信息流
     // 还挂着一串封面。浮层里能找到大图时只收浮层内的，避免收进无关封面。
-    function pickImagePool() {
-        const all = Array.from(document.images || []);
+    function pickMediaPool() {
+        const all = {
+            images: Array.from(document.images || []),
+            videos: Array.from(document.querySelectorAll?.("video") || []),
+        };
         const nodes = [];
         for (const selector of ['[role="dialog"]', ".note-detail-mask", ".note-detail", ".note-container"]) {
             for (const node of Array.from(document.querySelectorAll(selector) || [])) {
@@ -797,17 +795,18 @@
                 const height = Math.max(img.naturalHeight || 0, img.height || 0, Math.round(rect?.height || 0));
                 return width >= 300 && height >= 300;
             });
-            if (large.length) return large;
+            const videos = Array.from(node.querySelectorAll?.("video") || []);
+            if (large.length || videos.length) return { images: large, videos };
         }
 
         return all;
     }
 
-    function collectImages(limit = 20) {
+    function collectImages(limit = 20, pool = pickMediaPool().images) {
         const seen = new Set();
         const items = [];
 
-        for (const img of pickImagePool()) {
+        for (const img of pool) {
             const candidates = imageCandidates(img);
             const primary = candidates[0];
             if (!primary) continue;
@@ -843,8 +842,69 @@
         };
     }
 
+    // 与后台 isLongVideo 保持相同边界：超过 10 秒才按长视频保存。
+    function pickerVideoKind(duration, imageUrl) {
+        return imageUrl && !(Number.isFinite(duration) && duration > 10) ? "live" : "video";
+    }
+
+    function videoUnavailableReason(url, imageUrl, kind) {
+        if (!url) return "No video URL is available.";
+        if (!/^https?:/i.test(url)) {
+            // Live Photo 的动态段经常是页面临时创建的 blob。封面仍然可下载，
+            // 保存时先尝试从页面上下文取字节，失败再退回封面。
+            if (kind !== "live") return "This video uses a blob or local URL and cannot be saved.";
+            return /^https?:/i.test(imageUrl || "") ? "" : "The Live Photo cover URL cannot be downloaded.";
+        }
+        if (/\.(m3u8|mpd)(?:[?#]|$)/i.test(url)) return "Streaming playlists are not supported.";
+        if (/\.(webm|mkv|avi)(?:[?#]|$)/i.test(url)) return "Only MP4 and MOV videos are supported.";
+        if (kind === "live" && !/^https?:/i.test(imageUrl || "")) return "The Live Photo cover URL cannot be downloaded.";
+        return "";
+    }
+
+    function collectMedia(limit = 60) {
+        const pool = pickMediaPool();
+        const images = collectImages(Infinity, pool.images).items.map(item => ({ ...item, kind: "image" }));
+        const motion = [];
+        const seen = new Set();
+        const addMotion = (pair, element) => {
+            const url = pair.videoUrl || "";
+            if (url && seen.has(url)) return;
+            if (url) seen.add(url);
+            const rect = element.getBoundingClientRect?.();
+            const width = element.videoWidth || element.naturalWidth || element.width || Math.round(rect?.width || 0);
+            const height = element.videoHeight || element.naturalHeight || element.height || Math.round(rect?.height || 0);
+            const imageUrl = pair.imageUrl || "";
+            const kind = pickerVideoKind(pair.videoDuration, imageUrl);
+            motion.push({
+                kind, url, candidates: [url], imageUrl, displayUrl: imageUrl,
+                videoDuration: pair.videoDuration, width, height, area: width * height,
+                unavailableReason: videoUnavailableReason(url, imageUrl, kind),
+                // 动态段不是普通 http 地址，保存时依赖页面上下文，可能退回封面
+                coverFallback: kind === "live" && Boolean(url) && !/^https?:/i.test(url),
+            });
+        };
+        for (const video of pool.videos) addMotion(describeMediaElements(video, null), video);
+        // 即刻等站点可能只在图片的组件数据中暴露动态段，不猜测同名视频。
+        for (const image of pool.images) {
+            const pair = readReactLivePhoto(image) || readReactLivePhoto(image.parentElement);
+            if (pair?.videoUrl) {
+                addMotion({ ...pair, imageUrl: pair.imageUrl || absoluteUrl(image.currentSrc || image.src) }, image);
+            }
+        }
+        // 可保存的 Live Photo 已包含封面，同一封面不再默认单独上传一份。
+        const covers = new Set(motion.filter(item => item.kind === "live" && !item.unavailableReason).map(item => item.imageUrl));
+        return [...images.filter(item => !covers.has(item.displayUrl) && !covers.has(item.url)), ...motion]
+            .sort((a, b) => b.area - a.area).slice(0, limit);
+    }
+
+    function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return "Duration unknown";
+        const whole = Math.floor(seconds);
+        return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+    }
+
     // --------------------------------------------------
-    // 图片选择面板：注入到页面内的覆盖层
+    // 媒体选择面板：注入到页面内的覆盖层
     // --------------------------------------------------
     const PICKER_HOST_ID = "sgp-picker-host";
 
@@ -860,19 +920,31 @@
 
     const PICKER_STYLE = `
 .sgp-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
-.sgp-panel { width: min(940px, 100%); max-height: 86vh; background: #fff; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-.sgp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #ececec; }
+.sgp-panel { width: min(1180px, 100%); max-height: 88vh; background: #fff; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.sgp-head { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #ececec; }
 .sgp-title { font-size: 15px; font-weight: 600; color: #111; }
 .sgp-count { font-size: 12px; color: #666; }
-.sgp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; padding: 16px 18px; overflow-y: auto; align-items: start; flex: 1; min-height: 0; }
-.sgp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.sgp-scroll { overflow-y: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; padding: 16px 18px; }
+.sgp-grid { column-width: 260px; column-gap: 14px; }
+.sgp-card { display: inline-block; vertical-align: top; box-sizing: border-box; width: 100%; margin: 0 0 12px; break-inside: avoid; border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
 .sgp-card.selected { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
-.sgp-thumb { width: 100%; height: auto; min-height: 48px; display: block; object-fit: contain; background: #e8e8e8; }
-.sgp-thumb.missing { height: 0; padding-top: 75%; }
+.sgp-thumb { width: 100%; height: auto; display: block; object-fit: contain; background: #e8e8e8; }
+.sgp-thumb.missing { min-height: 48px; }
+.sgp-preview { position: relative; }
+.sgp-play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #ffffff80; border-radius: 24px; padding: 10px 14px; background: #152333cc; color: #fff; font: 13px system-ui, sans-serif; cursor: pointer; }
+.sgp-play[hidden] { display: none; }
 .sgp-meta { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 11px; color: #555; }
 .sgp-meta input { margin: 0; accent-color: #1a73e8; }
 .sgp-size { font-variant-numeric: tabular-nums; }
-.sgp-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-top: 1px solid #ececec; }
+.sgp-media-info { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 8px 8px; font-size: 11px; color: #666; }
+.sgp-kind { padding: 2px 6px; border-radius: 4px; background: #eee; color: #555; font-weight: 600; }
+.sgp-kind[data-kind="live"] { background: #e4f2e9; color: #20683c; }
+.sgp-kind[data-kind="video"] { background: #e5edfc; color: #2157a5; }
+.sgp-duration { font-variant-numeric: tabular-nums; }
+.sgp-note { color: #8a6d3b; font-size: 11px; }
+.sgp-card.unavailable { cursor: default; border-style: dashed; }
+.sgp-unavailable-reason { padding: 0 8px 8px; color: #9b3c27; font-size: 11px; line-height: 1.4; }
+.sgp-foot { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 18px; border-top: 1px solid #ececec; }
 .sgp-spacer { flex: 1; }
 .sgp-btn { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid #d5d5d5; background: #fff; color: #222; cursor: pointer; }
 .sgp-btn:hover { background: #f4f4f4; }
@@ -908,7 +980,7 @@
 
         const title = document.createElement("div");
         title.className = "sgp-title";
-        title.textContent = "Images on this page";
+        title.textContent = "Images and videos on this page";
 
         const count = document.createElement("div");
         count.className = "sgp-count";
@@ -916,62 +988,138 @@
         head.appendChild(title);
         head.appendChild(count);
 
+        // 滚动高度由外层约束，多列容器保持自然高度，卡片不会被压缩或拆开。
+        const scroll = document.createElement("div");
+        scroll.className = "sgp-scroll";
         const grid = document.createElement("div");
         grid.className = "sgp-grid";
+        scroll.appendChild(grid);
 
         const boxes = [];
         for (const item of items) {
             const card = document.createElement("div");
-            card.className = "sgp-card selected";
+            const isMotion = item.kind === "live" || item.kind === "video";
+            card.className = item.unavailableReason ? "sgp-card unavailable" : "sgp-card selected";
 
-            const thumb = document.createElement("img");
+            const thumb = document.createElement(isMotion ? "video" : "img");
             thumb.className = "sgp-thumb";
-            thumb.loading = "lazy";
-            thumb.decoding = "async";
-            thumb.alt = "";
-            // 按图片自身宽高比占位，加载前后都不会跳版
             if (item.width > 0 && item.height > 0) {
                 thumb.style.aspectRatio = `${item.width} / ${item.height}`;
+            } else if (isMotion) {
+                thumb.style.aspectRatio = "16 / 9";
             }
-            // 页面渲染地址排在前面，猜出来的原图候选留在后面。CDN 拒绝
-            // 某个域时依次往下退，全都失败才显示占位块。
-            const sources = [];
-            for (const url of [item.displayUrl, item.url, ...(item.candidates || [])]) {
-                if (url && !sources.includes(url)) sources.push(url);
-            }
-
-            let sourceIndex = 0;
-            const applySource = () => {
-                thumb.src = sources[sourceIndex];
-            };
-            thumb.addEventListener("error", () => {
-                if (sourceIndex + 1 < sources.length) {
-                    sourceIndex += 1;
-                    applySource();
-                    return;
+            if (isMotion) {
+                // 不自动播放，也不为打开选择器下载整段视频；用户点击后才预览。
+                thumb.preload = "none";
+                thumb.controls = false;
+                thumb.muted = true;
+                thumb.playsInline = true;
+                if (item.displayUrl) thumb.poster = item.displayUrl;
+                if (!item.unavailableReason) thumb.src = item.url;
+            } else {
+                thumb.loading = "lazy";
+                thumb.decoding = "async";
+                thumb.alt = "";
+                // 缩略图优先使用页面已加载的地址，失败后才尝试下载候选。
+                const sources = [];
+                for (const url of [item.displayUrl, item.url, ...(item.candidates || [])]) {
+                    if (url && !sources.includes(url)) sources.push(url);
                 }
-                thumb.removeAttribute("src");
-                thumb.classList.add("missing");
-            });
-            applySource();
+                let sourceIndex = 0;
+                const applySource = () => { thumb.src = sources[sourceIndex]; };
+                thumb.addEventListener("error", () => {
+                    if (sourceIndex + 1 < sources.length) {
+                        sourceIndex += 1;
+                        applySource();
+                        return;
+                    }
+                    thumb.removeAttribute("src");
+                    thumb.classList.add("missing");
+                });
+                applySource();
+            }
 
             const meta = document.createElement("div");
             meta.className = "sgp-meta";
-
             const box = document.createElement("input");
             box.type = "checkbox";
-            box.checked = true;
-
+            box.disabled = Boolean(item.unavailableReason);
+            box.checked = !box.disabled;
             const size = document.createElement("span");
             size.className = "sgp-size";
             size.textContent = formatDimensions(item);
-
             meta.appendChild(box);
             meta.appendChild(size);
-            card.appendChild(thumb);
-            card.appendChild(meta);
-            grid.appendChild(card);
 
+            const info = document.createElement("div");
+            info.className = "sgp-media-info";
+            const badge = document.createElement("span");
+            badge.className = "sgp-kind";
+            const updateKind = () => {
+                badge.textContent = item.kind === "live" ? "Live Photo" : isMotion ? "Video" : "Image";
+                badge.dataset.kind = item.kind || "image";
+            };
+            updateKind();
+            info.appendChild(badge);
+            if (item.coverFallback) {
+                const note = document.createElement("span");
+                note.className = "sgp-note";
+                note.textContent = "cover fallback";
+                info.appendChild(note);
+            }
+            if (isMotion) {
+                const duration = document.createElement("span");
+                duration.className = "sgp-duration";
+                duration.textContent = formatDuration(item.videoDuration);
+                info.appendChild(duration);
+                thumb.addEventListener("loadedmetadata", () => {
+                    // 预览拿到新时长后，标注和提交的快照一起更新，避免按旧类型保存。
+                    if (Number.isFinite(thumb.duration)) item.videoDuration = thumb.duration;
+                    item.kind = pickerVideoKind(item.videoDuration, item.imageUrl);
+                    updateKind();
+                    duration.textContent = formatDuration(item.videoDuration);
+                    if (thumb.videoWidth > 0 && thumb.videoHeight > 0) {
+                        item.width = thumb.videoWidth;
+                        item.height = thumb.videoHeight;
+                        size.textContent = formatDimensions(item);
+                        thumb.style.aspectRatio = `${item.width} / ${item.height}`;
+                    }
+                });
+            }
+            if (isMotion) {
+                const preview = document.createElement("div");
+                preview.className = "sgp-preview";
+                preview.appendChild(thumb);
+                if (!item.unavailableReason) {
+                    const play = document.createElement("button");
+                    play.className = "sgp-play";
+                    play.textContent = "▶";
+                    play.setAttribute("aria-label", "Preview video");
+                    play.addEventListener("click", (event) => {
+                        event.stopPropagation?.();
+                        play.hidden = true;
+                        thumb.controls = true;
+                        thumb.play().catch(() => {
+                            thumb.controls = false;
+                            play.hidden = false;
+                            play.textContent = "Retry preview";
+                        });
+                    });
+                    preview.appendChild(play);
+                }
+                card.appendChild(preview);
+            } else {
+                card.appendChild(thumb);
+            }
+            card.appendChild(meta);
+            card.appendChild(info);
+            if (item.unavailableReason) {
+                const reason = document.createElement("div");
+                reason.className = "sgp-unavailable-reason";
+                reason.textContent = item.unavailableReason;
+                card.appendChild(reason);
+            }
+            grid.appendChild(card);
             boxes.push(box);
 
             const sync = () => {
@@ -980,7 +1128,7 @@
             };
             box.addEventListener("change", sync);
             card.addEventListener("click", (event) => {
-                if (event.target === box) return;
+                if (box.disabled || event.target === box || (isMotion && event.target === thumb)) return;
                 box.checked = !box.checked;
                 sync();
             });
@@ -1014,7 +1162,7 @@
         foot.appendChild(save);
 
         panel.appendChild(head);
-        panel.appendChild(grid);
+        panel.appendChild(scroll);
         panel.appendChild(foot);
         overlay.appendChild(panel);
         shadow.appendChild(overlay);
@@ -1029,8 +1177,8 @@
 
         function setAll(checked) {
             boxes.forEach((box, index) => {
-                box.checked = checked;
-                grid.children[index]?.classList.toggle("selected", checked);
+                box.checked = checked && !box.disabled;
+                grid.children[index]?.classList.toggle("selected", box.checked);
             });
             updateCount();
         }
@@ -1043,7 +1191,7 @@
         });
 
         save.addEventListener("click", () => {
-            const chosen = items.filter((_, index) => boxes[index].checked);
+            const chosen = items.filter((_, index) => boxes[index].checked && !boxes[index].disabled);
             if (!chosen.length) return;
             closePicker();
             chrome.runtime.sendMessage({ action: "saveSelectedItems", items: chosen });
@@ -1056,11 +1204,10 @@
     function openPicker() {
         closePicker();
 
-        const collected = collectImages(60);
-        const items = collected.items || [];
+        const items = collectMedia(60);
 
         if (!items.length) {
-            const reason = "No large images were found on this page.";
+            const reason = "No large images or videos were found on this page.";
             createToast("error", "Nothing to save", reason);
             return { ok: false, reason };
         }

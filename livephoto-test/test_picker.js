@@ -157,8 +157,9 @@ function panelOf(topRoot) {
   const shadow = host?.shadowRoot;
   const overlay = shadow?.children?.find((el) => el.className === "sgp-overlay");
   const panel = overlay?.children?.[0];
-  const grid = panel?.children?.find((el) => el.className === "sgp-grid");
-  return { host, shadow, overlay, panel, grid, cards: grid?.children || [] };
+  const scroll = panel?.children?.find((el) => el.className === "sgp-scroll");
+  const grid = scroll?.children?.find((el) => el.className === "sgp-grid");
+  return { host, shadow, overlay, panel, scroll, grid, cards: grid?.children || [] };
 }
 
 const opened = open();
@@ -166,8 +167,9 @@ const opened = open();
 check("面板打开成功", opened?.ok === true, opened?.reason);
 check("只统计大图", opened?.count === 3, String(opened?.count));
 
-const { shadow, panel, cards } = panelOf(root);
+const { shadow, panel, scroll, grid, cards } = panelOf(root);
 check("面板挂在 Shadow DOM 内", Boolean(shadow));
+check("滚动区与自然高度的多列容器分开", Boolean(scroll) && grid?.parentNode === scroll);
 check("每张图一张卡片", cards.length === 3, String(cards.length));
 
 const sizes = cards
