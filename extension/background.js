@@ -10,6 +10,36 @@ const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
 const CONTEXT_MENU_ID = "save-to-google-photos";
 
+// Google Photos 单文件上限按官方口径 200 MB，超限只会由 API 侧失败，
+// 提前在本地拦下来可以给出可操作的提示。
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+// 页面上下文回退要用 base64 跨进程传输，内存会翻倍，只处理中小文件
+const PAGE_FALLBACK_MAX_BYTES = 25 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 120000;
+
+const HISTORY_KEY = "sgp_history";
+const SEEN_KEY = "sgp_seen";
+const HISTORY_MAX = 100;
+const SEEN_MAX = 500;
+
+const ALLOWED_IMAGE = /^image\/(jpeg|jpg|png|webp|heic|heif|gif)$/i;
+const ALLOWED_VIDEO = /^video\/(mp4|quicktime|x-m4v)$/i;
+
+const MIME_BY_EXT = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  gif: "image/gif",
+  avif: "image/avif",
+  mp4: "video/mp4",
+  m4v: "video/x-m4v",
+  mov: "video/quicktime",
+  webm: "video/webm",
+};
+
 // --------------------------------------------------
 // 1. Context Menu
 // --------------------------------------------------
@@ -51,37 +81,114 @@ async function handleSave(tab, srcUrl, mediaType) {
     return;
   }
 
-  if (mediaType === "video") {
-    showToast(
-      tabId,
-      "error",
-      "Not a Live Photo",
-      "这个视频没有配套的封面图，无法作为 Live Photo 保存。"
-    );
-    return;
-  }
-
-  await handleSingleImage(tabId, srcUrl);
+  await handleSingleMedia(tabId, srcUrl, mediaType === "video" ? "video" : "image");
 }
 
-async function handleSingleImage(tabId, imageUrl) {
+// --------------------------------------------------
+// 2. 普通媒体：图片或视频，不再要求配对
+// --------------------------------------------------
+async function handleSingleMedia(tabId, url, kind) {
+  const result = await saveOne(tabId, url, kind);
+  return result;
+}
+
+// 返回 "saved" | "skipped" | "failed"
+async function saveOne(tabId, url, kind, options = {}) {
+  const label = kind === "video" ? "video" : "image";
+  const quiet = options.quiet === true;
+
   try {
-    showToast(tabId, "loading", "Uploading…", "Saving image to Google Photos…");
+    if (!quiet) {
+      showToast(tabId, "loading", `Saving ${label}…`, "Reading the file from this page.");
+    }
 
-    const token = await getAuthToken(true);
-    const { blob, mimeType, fileName } = await downloadImage(imageUrl);
-    const uploadToken = await uploadBytes(token, blob, mimeType, fileName);
-    await createMediaItem(token, uploadToken, fileName, imageUrl);
+    const media = await downloadMedia(tabId, url, kind, (received, total) => {
+      if (quiet) return;
+      const detail =
+        total > 0
+          ? `${formatBytes(received)} of ${formatBytes(total)} (${Math.round((received / total) * 100)}%)`
+          : `${formatBytes(received)} downloaded`;
+      showToast(tabId, "loading", `Downloading ${label}…`, detail);
+    });
 
-    showToast(tabId, "success", "Saved!", "Image saved to Google Photos");
+    assertUploadable(media, kind);
+
+    const fp = fingerprint(url, media.size);
+    if (await isSeen(fp)) {
+      await addHistory({
+        status: "skipped",
+        kind,
+        name: media.fileName,
+        url: shortUrl(url),
+        message: "Already uploaded from this source.",
+      });
+      if (!quiet) {
+        showToast(
+          tabId,
+          "success",
+          "Already saved",
+          "This file was uploaded before, skipped to avoid a duplicate."
+        );
+      }
+      return "skipped";
+    }
+
+    if (!quiet) {
+      showToast(
+        tabId,
+        "loading",
+        `Uploading ${formatBytes(media.size)}…`,
+        `Saving ${label} to Google Photos…`
+      );
+    }
+
+    await withAuthRetry(async (token) => {
+      const uploadToken = await uploadBytes(token, media.blob, media.mimeType, media.fileName);
+      await createMediaItem(token, uploadToken, media.fileName, url);
+    });
+
+    await markSeen(fp);
+    await addHistory({
+      status: "saved",
+      kind,
+      name: media.fileName,
+      url: shortUrl(url),
+      message: formatBytes(media.size),
+    });
+
+    if (!quiet) {
+      showToast(
+        tabId,
+        "success",
+        "Saved!",
+        `${label === "video" ? "Video" : "Image"} saved to Google Photos (${formatBytes(media.size)})`
+      );
+    }
+    return "saved";
   } catch (err) {
-    console.error("[Save to Google Photos]", err);
-    showToast(tabId, "error", "Upload Failed", err.message || String(err));
+    console.error("[Save to Google Photos]", kind, err);
+    const message = err.message || String(err);
+    await addHistory({
+      status: "failed",
+      kind,
+      name: "",
+      url: shortUrl(url),
+      message,
+    });
+    if (!quiet) {
+      showToast(tabId, "error", "Save Failed", message);
+    }
+    // 失败时补一条系统通知，用户切走标签页也能看到原因。
+    // 批量模式下只在最后汇总一条，避免 20 张图弹 20 条。
+    if (!quiet) {
+      await notifyFailureWhenHidden(tabId, `Could not save ${label}`, message);
+    }
+    return "failed";
   }
 }
 
 // --------------------------------------------------
-// 2. Auth helpers
+// 3. Auth helpers
 // --------------------------------------------------
 function getAuthToken(interactive = false) {
   return new Promise((resolve, reject) => {
@@ -97,41 +204,293 @@ function getAuthToken(interactive = false) {
   });
 }
 
-// --------------------------------------------------
-// 3. Download image
-// --------------------------------------------------
-async function downloadImage(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download image (HTTP ${response.status})`);
-  }
+function invalidateToken(token) {
+  return new Promise((resolve) => {
+    chrome.identity.removeCachedAuthToken({ token }, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
+}
 
-  const blob = await response.blob();
-  const mimeType = blob.type || "image/jpeg";
-
-  // Try to derive a file name from the URL
-  let fileName = "image";
+// identity 返回的是缓存 token，有效期约一小时。过期后 uploads 会返回 401，
+// 这里清掉缓存再取一次并重跑任务，用户不必手动退出登录。
+async function withAuthRetry(task) {
+  const token = await getAuthToken(true);
   try {
-    const pathname = new URL(url).pathname;
-    const parts = pathname.split("/");
-    const last = parts[parts.length - 1];
-    if (last && last.includes(".")) {
-      fileName = decodeURIComponent(last);
-    } else {
-      // Fallback: generate a timestamped name
-      const ext = mimeType.split("/")[1] || "jpg";
-      fileName = `photo_${Date.now()}.${ext}`;
-    }
-  } catch {
-    const ext = mimeType.split("/")[1] || "jpg";
-    fileName = `photo_${Date.now()}.${ext}`;
+    return await task(token);
+  } catch (err) {
+    if (!isAuthError(err)) throw err;
+    await invalidateToken(token);
+    return task(await getAuthToken(true));
   }
+}
 
-  return { blob, mimeType, fileName };
+function isAuthError(err) {
+  if (!err) return false;
+  if (err.status === 401) return true;
+  return err.status === 403 && /credential|token|auth/i.test(err.detail || "");
+}
+
+function httpError(label, response, text) {
+  const detail = (text || "").slice(0, 300);
+  const err = new Error(
+    detail
+      ? `${label} failed (HTTP ${response.status}): ${detail}`
+      : `${label} failed (HTTP ${response.status})`
+  );
+  err.status = response.status;
+  err.detail = detail;
+  return err;
+}
+
+// Google 的 description 上限是 1000 字符。带签名参数的 CDN 地址经常超过这个长度，
+// 整条 batchCreate 会直接失败。只保留 host 和路径，同时避免把临时凭据写进照片描述。
+const DESCRIPTION_MAX = 1000;
+
+function buildDescription(sourceUrl) {
+  if (!sourceUrl) return "";
+  let clean = sourceUrl;
+  try {
+    const parsed = new URL(sourceUrl);
+    clean = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    // 非法 URL 原样使用
+  }
+  return clean.slice(0, DESCRIPTION_MAX);
 }
 
 // --------------------------------------------------
-// 4. Upload bytes (Step 1 of Google Photos upload)
+// 4. Download：带进度，失败时回退到页面上下文
+// --------------------------------------------------
+async function downloadMedia(tabId, url, kind, onProgress) {
+  assertImageUrl(url);
+  assertFetchable(url, kind === "video" ? "video" : "image");
+
+  let bytes;
+  let mimeType = "";
+
+  try {
+    const result = await fetchWithProgress(url, onProgress);
+    bytes = result.bytes;
+    mimeType = result.mimeType;
+  } catch (err) {
+    // 防盗链站点会按 Referer 拒绝扩展进程，页面上下文带着同源 Referer 往往能拿到
+    console.warn("[Save to Google Photos] 直接下载失败，回退页面上下文", url, err.message);
+    const fallback = await fetchViaPage(tabId, url);
+    bytes = fallback.bytes;
+    mimeType = fallback.mimeType;
+  }
+
+  mimeType = normalizeMime(mimeType, url, kind);
+  const size = bytes.byteLength;
+  const fileName = buildFileName(url, mimeType, kind);
+  const blob = new Blob([bytes], { type: mimeType });
+
+  return { blob, bytes, mimeType, size, fileName };
+}
+
+async function fetchWithProgress(url, onProgress) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(url, { signal: controller.signal, redirect: "follow" });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") {
+      const timeout = new Error(
+        `Download timed out after ${Math.round(DOWNLOAD_TIMEOUT_MS / 1000)}s: ${shortUrl(url)}`
+      );
+      timeout.downloadFailed = true;
+      throw timeout;
+    }
+    const failure = new Error(
+      "Could not download this file. The site may block direct downloads."
+    );
+    failure.downloadFailed = true;
+    throw failure;
+  }
+
+  if (!response.ok) {
+    clearTimeout(timer);
+    const err = new Error(
+      `Could not download this file (HTTP ${response.status}). The site may block direct downloads.`
+    );
+    err.status = response.status;
+    err.downloadFailed = true;
+    throw err;
+  }
+
+  const mimeType = normalizeContentType(response.headers.get("content-type"));
+  const total = Number(response.headers.get("content-length")) || 0;
+
+  let bytes;
+  if (!response.body) {
+    bytes = new Uint8Array(await response.arrayBuffer());
+  } else {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        onProgress?.(received, total);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    bytes = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+  }
+
+  return { bytes, mimeType };
+}
+
+// 页面上下文抓字节：content script 的请求由页面发出，会带上站点需要的 Referer
+async function fetchViaPage(tabId, url) {
+  if (!tabId) {
+    throw new Error("The file could not be downloaded and there is no page available to retry from.");
+  }
+
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tabId, { action: "fetchAsBase64", url });
+  } catch {
+    throw new Error("The file could not be downloaded, and the page could not be reached to retry.");
+  }
+
+  if (!response || !response.ok) {
+    throw new Error(
+      response?.error
+        ? `Could not download this file: ${response.error}`
+        : "Could not download this file, even from the page context."
+    );
+  }
+
+  const bytes = base64ToBytes(response.base64);
+  return { bytes, mimeType: response.mimeType || "" };
+}
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+function normalizeContentType(value) {
+  return String(value || "").split(";")[0].trim().toLowerCase();
+}
+
+// Content-Type 缺失或被站点写成 application/octet-stream 时，按扩展名补
+function normalizeMime(mimeType, url, kind) {
+  const clean = normalizeContentType(mimeType);
+  if (clean && (clean.startsWith("image/") || clean.startsWith("video/"))) {
+    return clean;
+  }
+  const ext = extensionOf(url);
+  if (ext && MIME_BY_EXT[ext]) return MIME_BY_EXT[ext];
+  return kind === "video" ? "video/mp4" : "image/jpeg";
+}
+
+function extensionOf(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    return match ? match[1].toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+function buildFileName(url, mimeType, kind) {
+  const ext = extensionOf(url) || extFromMime(mimeType) || (kind === "video" ? "mp4" : "jpg");
+  let base = "";
+  try {
+    const last = new URL(url).pathname.split("/").filter(Boolean).pop();
+    if (last) base = safeDecode(last.replace(/\.[^.]+$/, ""));
+  } catch {
+    // 忽略，走默认名
+  }
+
+  // X-Goog-Upload-File-Name 只接受 ASCII，中文文件名会让 fetch 直接抛错
+  const ascii = base.replace(/[^\x20-\x7E]/g, "").replace(/["\\/:*?<>|]/g, "_").trim();
+  const usable = /[a-zA-Z0-9]/.test(ascii) ? ascii : `photo_${Date.now()}`;
+  return `${usable.slice(0, 120)}.${ext}`;
+}
+
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function extFromMime(mimeType) {
+  const entry = Object.entries(MIME_BY_EXT).find(([, mime]) => mime === mimeType);
+  return entry ? entry[0] : "";
+}
+
+// blob: 地址属于页面上下文，扩展进程拿不到原始字节。提前说明原因，
+// 避免用户看到 HTTP 0 这类无从下手的信息。
+function assertImageUrl(url) {
+  if (/^blob:/i.test(url)) {
+    throw new Error(
+      "This image is rendered from a blob URL, so its original file cannot be read. Try saving another image on this page."
+    );
+  }
+}
+
+function assertFetchable(url, label) {
+  if (/^blob:/i.test(url)) {
+    throw new Error(
+      `The ${label} uses a blob URL, so the extension cannot read the original file.`
+    );
+  }
+  if (/\.m3u8(\?|$)/i.test(url)) {
+    throw new Error(
+      `The ${label} is an HLS stream, so the extension cannot download the full file.`
+    );
+  }
+}
+
+// 大小与格式前置校验：把 API 侧的失败提前成本地可读的提示
+function assertUploadable(media, kind) {
+  if (!media.size) {
+    throw new Error("The downloaded file is empty, so there is nothing to upload.");
+  }
+  if (media.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `This file is ${formatBytes(media.size)}, above the ${formatBytes(MAX_UPLOAD_BYTES)} Google Photos upload limit.`
+    );
+  }
+
+  const allowed = kind === "video" ? ALLOWED_VIDEO : ALLOWED_IMAGE;
+  if (!allowed.test(media.mimeType)) {
+    throw new Error(
+      `Unsupported ${kind} format: ${media.mimeType || "unknown"}. ${
+        kind === "video"
+          ? "Google Photos accepts MP4 and MOV."
+          : "Google Photos accepts JPEG, PNG, WebP, HEIC and GIF."
+      }`
+    );
+  }
+}
+
+// --------------------------------------------------
+// 5. Upload bytes (Step 1 of Google Photos upload)
 // --------------------------------------------------
 async function uploadBytes(token, blob, mimeType, fileName) {
   const response = await fetch(GOOGLE_PHOTOS_UPLOAD_URL, {
@@ -147,8 +506,7 @@ async function uploadBytes(token, blob, mimeType, fileName) {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Upload failed (${response.status}): ${text}`);
+    throw httpError("Upload", response, await response.text());
   }
 
   const uploadToken = await response.text();
@@ -156,13 +514,13 @@ async function uploadBytes(token, blob, mimeType, fileName) {
 }
 
 // --------------------------------------------------
-// 5. Create media item (Step 2 of Google Photos upload)
+// 6. Create media item (Step 2 of Google Photos upload)
 // --------------------------------------------------
 async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
   const body = {
     newMediaItems: [
       {
-        description: sourceUrl || "",
+        description: buildDescription(sourceUrl),
         simpleMediaItem: {
           uploadToken,
           fileName,
@@ -181,8 +539,7 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Create media item failed (${response.status}): ${text}`);
+    throw httpError("Create media item", response, await response.text());
   }
 
   const result = await response.json();
@@ -197,7 +554,7 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 }
 
 // --------------------------------------------------
-// 6. Live Photo：找配套视频并合成 Motion Photo
+// 7. Live Photo：找配套视频并合成 Motion Photo
 // --------------------------------------------------
 async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
   const tabId = tab?.id;
@@ -213,36 +570,84 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
     // 1) 确定主图与动态段，两个入口共用后续流程
     const pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx);
 
-    // 2) 拿授权
-    const token = await getAuthToken(true);
-
-    // 3) 下载主图、必要时转成 JPEG，再合成
+    // 2) 下载主图、必要时转成 JPEG，再合成
     showToast(tabId, "loading", "Building Live Photo…", "Merging photo and motion into one file.");
-    const photoBytes = await fetchBytes(pair.imageUrl);
-    const jpegBytes = await ensureJpeg(photoBytes, pair.imageUrl);
+    const photo = await fetchBytes(pair.imageUrl, tabId, (received, total) => {
+      const detail =
+        total > 0
+          ? `${formatBytes(received)} of ${formatBytes(total)} (${Math.round((received / total) * 100)}%)`
+          : `${formatBytes(received)} downloaded`;
+      showToast(tabId, "loading", "Downloading cover image…", detail);
+    });
+    const jpegBytes = await ensureJpeg(photo.bytes, pair.imageUrl, tabId);
     const result = self.MotionPhoto.assemble(
       jpegBytes,
       new Uint8Array(pair.videoBytes)
     );
 
+    // 同一组照片和视频重复合成会生成重复条目，用地址加动态段长度做指纹
+    const fp = fingerprint(pair.imageUrl, `live:${new Uint8Array(pair.videoBytes).length}`);
+    if (await isSeen(fp)) {
+      await addHistory({
+        status: "skipped",
+        kind: "live",
+        name: "",
+        url: shortUrl(pair.imageUrl),
+        message: "Already uploaded from this source.",
+      });
+      showToast(
+        tabId,
+        "success",
+        "Already saved",
+        "This Live Photo was uploaded before, skipped to avoid a duplicate."
+      );
+      return;
+    }
+
     const fileName = buildMotionPhotoName(pair.imageUrl);
 
-    // 4) 上传
-    showToast(tabId, "loading", "Uploading…", "Saving Live Photo to Google Photos…");
+    // 3) 上传
+    const size = result.bytes.byteLength;
+    showToast(
+      tabId,
+      "loading",
+      `Uploading ${formatBytes(size)}…`,
+      "Saving Live Photo to Google Photos…"
+    );
     const blob = new Blob([result.bytes], { type: "image/jpeg" });
-    const uploadToken = await uploadBytes(token, blob, "image/jpeg", fileName);
-    await createMediaItem(token, uploadToken, fileName, pair.imageUrl);
+    await withAuthRetry(async (token) => {
+      const uploadToken = await uploadBytes(token, blob, "image/jpeg", fileName);
+      await createMediaItem(token, uploadToken, fileName, pair.imageUrl);
+    });
 
-    const note = result.warnings.length ? `（${result.warnings.join("；")}）` : "";
+    await markSeen(fp);
+    await addHistory({
+      status: "saved",
+      kind: "live",
+      name: fileName,
+      url: shortUrl(pair.imageUrl),
+      message: formatBytes(size),
+    });
+
+    const note = result.warnings.length ? ` (${result.warnings.join("; ")})` : "";
     showToast(
       tabId,
       "success",
       "Live Photo Saved!",
-      `静态图 ${formatBytes(result.stillSize)} + 动态 ${formatBytes(result.videoSize)}${note}`
+      `Still ${formatBytes(result.stillSize)} + motion ${formatBytes(result.videoSize)}${note}`
     );
   } catch (err) {
     console.error("[Save to Google Photos] Live Photo", err);
-    showToast(tabId, "error", "Live Photo Failed", err.message || String(err));
+    const message = err.message || String(err);
+    await addHistory({
+      status: "failed",
+      kind: "live",
+      name: "",
+      url: shortUrl(srcUrl),
+      message,
+    });
+    showToast(tabId, "error", "Live Photo Failed", message);
+    notifyFailure("Could not save Live Photo", message);
   }
 }
 
@@ -254,57 +659,54 @@ async function resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx) {
   if (mediaType === "video") {
     const videoUrl = fromContext?.videoUrl || srcUrl;
     if (!videoUrl) {
-      throw new Error(fromContext?.reason || "没有找到这个视频的播放地址。");
+      throw new Error(
+        fromContext?.reason || "No playable URL was found for this video."
+      );
     }
-    assertFetchable(videoUrl, "视频");
+    assertFetchable(videoUrl, "video");
 
     let imageUrl = fromContext?.imageUrl || null;
-    let via = fromContext?.via || "页面元素";
+    let via = fromContext?.via || "page element";
     if (!imageUrl) {
       const cover = await requestCoverImage(tabId, videoUrl);
       if (!cover) {
-        throw new Error("这个视频附近找不到可用的封面图，无法合成 Live Photo。");
+        throw new Error(
+          "No usable cover image was found near this video, so a Live Photo cannot be built."
+        );
       }
       imageUrl = cover.imageUrl;
       via = cover.via;
     }
 
-    const videoBytes = await fetchBytes(videoUrl);
-    if (!self.MotionPhoto.isMp4(new Uint8Array(videoBytes))) {
-      throw new Error(`视频不是 MP4 容器，Motion Photo 无法封装：${shortUrl(videoUrl)}`);
+    assertFetchable(imageUrl, "cover image");
+    const video = await fetchBytes(videoUrl, tabId);
+    if (!self.MotionPhoto.isMp4(new Uint8Array(video.bytes))) {
+      throw new Error(
+        `The video is not an MP4 container, so it cannot be packaged as a Motion Photo: ${shortUrl(videoUrl)}`
+      );
     }
 
-    return { imageUrl, videoBytes, via };
+    return { imageUrl, videoBytes: video.bytes, via };
   }
 
   // 图片入口：视频优先取页面数据，其次按元素和同名规则探测
   if (fromContext?.videoUrl) {
-    assertFetchable(fromContext.videoUrl, "视频");
-    const videoBytes = await fetchBytes(fromContext.videoUrl);
-    if (self.MotionPhoto.isMp4(new Uint8Array(videoBytes))) {
-      return { imageUrl: srcUrl, videoBytes, via: fromContext.via };
+    assertFetchable(fromContext.videoUrl, "video");
+    const video = await fetchBytes(fromContext.videoUrl, tabId);
+    if (self.MotionPhoto.isMp4(new Uint8Array(video.bytes))) {
+      return { imageUrl: srcUrl, videoBytes: video.bytes, via: fromContext.via };
     }
   }
 
   const source = await requestVideoSource(tabId, srcUrl);
-  const video = await resolveVideoBytes(source);
+  const video = await resolveVideoBytes(source, tabId);
   if (!video) {
     throw new Error(
       source.reason ||
-      "这个页面没有提供可用的动态视频。已尝试同名文件和页面视频元素。"
+      "This page does not expose a usable motion video. Same-name files and page video elements were both tried."
     );
   }
   return { imageUrl: srcUrl, videoBytes: video.bytes, via: video.url };
-}
-
-// blob: 与 m3u8 这类地址在扩展里拿不到完整文件，提前给出清楚的原因
-function assertFetchable(url, label) {
-  if (/^blob:/i.test(url)) {
-    throw new Error(`${label}使用的是 blob 地址，扩展无法读取原始文件。`);
-  }
-  if (/\.m3u8(\?|$)/i.test(url)) {
-    throw new Error(`${label}是 HLS 流，扩展无法直接下载完整文件。`);
-  }
 }
 
 function requestVideoSource(tabId, imageUrl) {
@@ -342,17 +744,11 @@ function requestContextPair(tabId) {
 }
 
 // Motion Photo 的主图必须是 JPEG。非 JPEG 用 OffscreenCanvas 转码。
-async function ensureJpeg(bytes, url) {
+async function ensureJpeg(bytes, url, tabId) {
   const arr = new Uint8Array(bytes);
   if (self.MotionPhoto.isJpeg(arr)) return arr;
 
-  let bitmap;
-  try {
-    bitmap = await createImageBitmap(new Blob([arr]));
-  } catch {
-    throw new Error(`封面图格式无法解码：${shortUrl(url)}`);
-  }
-
+  const bitmap = await decodeImage(arr, url, tabId);
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, 0, 0);
@@ -361,35 +757,51 @@ async function ensureJpeg(bytes, url) {
   const jpegBlob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 });
   const out = new Uint8Array(await jpegBlob.arrayBuffer());
   if (!self.MotionPhoto.isJpeg(out)) {
-    throw new Error("封面图转码为 JPEG 失败");
+    throw new Error("Converting the cover image to JPEG failed.");
   }
   return out;
 }
 
-async function fetchBytes(url, timeoutMs = 90000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
+// Chrome 解码不了 HEIC/HEIF。先试同一 CDN 的 JPEG 变体，再给出明确结论。
+async function decodeImage(bytes, url, tabId) {
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`Failed to download ${shortUrl(url)} (HTTP ${response.status})`);
-    }
-    return await response.arrayBuffer();
+    return await createImageBitmap(new Blob([bytes]));
   } catch (err) {
-    if (err.name === "AbortError") {
-      throw new Error(
-        `下载超时（${Math.round(timeoutMs / 1000)} 秒）：${shortUrl(url)}`
-      );
+    const variant = jpegVariantOf(url);
+    if (variant) {
+      try {
+        const photo = await fetchBytes(variant, tabId);
+        return await createImageBitmap(new Blob([photo.bytes]));
+      } catch {
+        // 落到下面的统一报错
+      }
     }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+    throw new Error(
+      `This cover image format cannot be decoded by the browser (${shortUrl(url)}). If it is HEIC, try saving a JPEG version of the same photo.`
+    );
+  }
+}
+
+// 常见 CDN 的 HEIC 地址后接 /format/jpeg 会返回 JPEG
+function jpegVariantOf(url) {
+  if (!/\.(heic|heif)(\?|$)/i.test(url) && !/heic|heif/i.test(url)) return null;
+  // 已经是 JPEG 变体的地址不必再拼参数
+  if (/[?&/]format=jpe?g/i.test(url)) return null;
+  return `${url}${url.includes("?") ? "&" : "?"}format=jpeg`;
+}
+
+async function fetchBytes(url, tabId, onProgress) {
+  try {
+    const result = await fetchWithProgress(url, onProgress);
+    return result;
+  } catch (err) {
+    console.warn("[Save to Google Photos] 下载失败，尝试页面上下文", shortUrl(url), err.message);
+    return fetchViaPage(tabId, url);
   }
 }
 
 // 返回 { bytes } 或 null。先试页面给出的地址，再逐个探测同名候选。
-async function resolveVideoBytes(source) {
+async function resolveVideoBytes(source, tabId) {
   if (!source) return null;
 
   const urls = [];
@@ -398,9 +810,9 @@ async function resolveVideoBytes(source) {
 
   for (const url of urls.slice(0, 6)) {
     try {
-      const bytes = await fetchBytes(url);
-      if (self.MotionPhoto.isMp4(new Uint8Array(bytes))) {
-        return { bytes, url };
+      const media = await fetchBytes(url, tabId);
+      if (self.MotionPhoto.isMp4(new Uint8Array(media.bytes))) {
+        return { bytes: media.bytes, url };
       }
     } catch (err) {
       console.warn("[Save to Google Photos] 候选视频不可用", url, err);
@@ -413,14 +825,15 @@ function buildMotionPhotoName(url) {
   let name = "photo";
   try {
     const last = new URL(url).pathname.split("/").filter(Boolean).pop();
-    if (last) name = decodeURIComponent(last);
+    if (last) name = safeDecode(last);
   } catch {
     // 忽略，用默认名
   }
 
   name = name.split("?")[0];
   const base = name.replace(/\.[^.]+$/, "");
-  return `${base || "photo"}.MP.jpg`;
+  const ascii = base.replace(/[^\x20-\x7E]/g, "").replace(/["\\/:*?<>|]/g, "_").trim();
+  return `${/[a-zA-Z0-9]/.test(ascii) ? ascii.slice(0, 120) : "photo"}.MP.jpg`;
 }
 
 function shortUrl(url) {
@@ -439,7 +852,163 @@ function formatBytes(bytes) {
 }
 
 // --------------------------------------------------
-// 7. In-page toast notifications (via content script)
+// 8. 批量保存：由 popup 触发，逐个上传
+// --------------------------------------------------
+async function saveAllImages(tabId, limit = 20) {
+  let listed;
+  try {
+    listed = await chrome.tabs.sendMessage(tabId, { action: "collectImages" });
+  } catch {
+    await chrome.scripting
+      .executeScript({ target: { tabId }, files: ["content.js"] })
+      .catch(() => {});
+    try {
+      listed = await chrome.tabs.sendMessage(tabId, { action: "collectImages" });
+    } catch {
+      listed = null;
+    }
+  }
+
+  const urls = Array.isArray(listed?.images) ? listed.images.slice(0, limit) : [];
+  if (!urls.length) {
+    showToast(tabId, "error", "Nothing to save", "No large images were found on this page.");
+    return { total: 0, saved: 0, skipped: 0, failed: 0 };
+  }
+
+  const counts = { total: urls.length, saved: 0, skipped: 0, failed: 0 };
+
+  for (let i = 0; i < urls.length; i++) {
+    showToast(
+      tabId,
+      "loading",
+      `Saving ${i + 1} of ${urls.length}…`,
+      "Uploading the images found on this page."
+    );
+    const outcome = await saveOne(tabId, urls[i], "image", { quiet: true });
+    counts[outcome] = (counts[outcome] || 0) + 1;
+    // 轻微间隔，避免并发限流
+    await delay(250);
+  }
+
+  const parts = [`${counts.saved} saved`];
+  if (counts.skipped) parts.push(`${counts.skipped} skipped`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+
+  showToast(
+    tabId,
+    counts.failed ? "error" : "success",
+    counts.failed ? "Finished with errors" : "Batch finished",
+    `${parts.join(", ")} out of ${counts.total}.`
+  );
+
+  if (counts.failed) {
+    await notifyFailureWhenHidden(
+      tabId,
+      "Batch finished with errors",
+      `${counts.failed} of ${counts.total} images could not be uploaded.`
+    );
+  }
+
+  return counts;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --------------------------------------------------
+// 9. 历史记录与重复检测
+// --------------------------------------------------
+function storageGet(key) {
+  return new Promise((resolve) => {
+    const local = chrome.storage?.local;
+    if (!local) return resolve(undefined);
+    local.get(key, (data) => resolve(data ? data[key] : undefined));
+  });
+}
+
+function storageSet(key, value) {
+  return new Promise((resolve) => {
+    const local = chrome.storage?.local;
+    if (!local) return resolve();
+    local.set({ [key]: value }, () => resolve());
+  });
+}
+
+async function addHistory(entry) {
+  const list = (await storageGet(HISTORY_KEY)) || [];
+  list.unshift({ ...entry, time: Date.now() });
+  await storageSet(HISTORY_KEY, list.slice(0, HISTORY_MAX));
+}
+
+async function readHistory() {
+  return (await storageGet(HISTORY_KEY)) || [];
+}
+
+async function clearHistory() {
+  await storageSet(HISTORY_KEY, []);
+}
+
+// 同一地址重复点击会生成两份文件，用「去查询串的地址 + 字节数」做指纹
+function fingerprint(url, size) {
+  let clean = String(url || "");
+  try {
+    const parsed = new URL(clean);
+    clean = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    // 非法 URL 原样参与指纹
+  }
+  return `${clean}|${size}`;
+}
+
+async function isSeen(fp) {
+  const seen = (await storageGet(SEEN_KEY)) || [];
+  return seen.includes(fp);
+}
+
+async function markSeen(fp) {
+  const seen = (await storageGet(SEEN_KEY)) || [];
+  if (seen.includes(fp)) return;
+  seen.unshift(fp);
+  await storageSet(SEEN_KEY, seen.slice(0, SEEN_MAX));
+}
+
+// --------------------------------------------------
+// 10. Notifications
+// --------------------------------------------------
+// 页面在前台时 toast 已经可见，不必再弹一条系统通知
+async function notifyFailureWhenHidden(tabId, title, message) {
+  try {
+    const tab = tabId && chrome.tabs?.get ? await chrome.tabs.get(tabId) : null;
+    if (tab && tab.active) return;
+  } catch {
+    // 拿不到标签页状态时按后台处理
+  }
+  notifyFailure(title, message);
+}
+
+function notifyFailure(title, message) {
+  try {
+    if (!chrome.notifications?.create) return;
+    chrome.notifications.create(
+      {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title: String(title).slice(0, 60),
+        message: String(message || "Unknown error").slice(0, 200),
+        priority: 1,
+      },
+      () => {
+        void chrome.runtime.lastError;
+      }
+    );
+  } catch {
+    // 通知不可用时静默，页面内提示已经覆盖了主要路径
+  }
+}
+
+// --------------------------------------------------
+// 11. In-page toast notifications (via content script)
 // --------------------------------------------------
 function showToast(tabId, type, title, message) {
   if (!tabId) return;
@@ -483,7 +1052,7 @@ function showToast(tabId, type, title, message) {
 }
 
 // --------------------------------------------------
-// 8. Message handler for popup communication
+// 12. Message handler for popup communication
 // --------------------------------------------------
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === "setMenuMode") {
@@ -519,6 +1088,27 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         sendResponse({ success: true });
       }
     });
+    return true;
+  }
+
+  if (request.action === "saveAllImages") {
+    saveAllImages(request.tabId, request.limit)
+      .then((counts) => sendResponse({ success: true, counts }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "getHistory") {
+    readHistory()
+      .then((items) => sendResponse({ success: true, items: items.slice(0, 20) }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "clearHistory") {
+    clearHistory()
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
   }
 });

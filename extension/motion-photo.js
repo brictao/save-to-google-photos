@@ -93,7 +93,7 @@
   }
 
   function stripExistingXmp(jpeg) {
-    if (!isJpeg(jpeg)) throw new Error("主图不是合法 JPEG（缺少 SOI）");
+    if (!isJpeg(jpeg)) throw new Error("The primary image is not a valid JPEG (missing SOI).");
 
     const parts = [jpeg.subarray(0, 2)];
     const xmpHeader = utf8(XMP_HEADER_STR);
@@ -136,7 +136,9 @@
     const payload = concat([utf8(XMP_HEADER_STR), xmp]);
     const segLen = payload.length + 2;
     if (segLen > 0xffff) {
-      throw new Error(`XMP 段过长（${segLen} 字节），超过 APP1 上限 65535`);
+      throw new Error(
+        `The XMP segment is too large (${segLen} bytes), exceeding the 65535-byte APP1 limit.`
+      );
     }
     const head = new Uint8Array([0xff, 0xe1, (segLen >> 8) & 0xff, segLen & 0xff]);
     return concat([jpeg.subarray(0, 2), head, payload, jpeg.subarray(2)]);
@@ -282,24 +284,34 @@
   // --------------------------------------------------
   function assemble(primaryJpeg, videoBytes, options = {}) {
     if (!isJpeg(primaryJpeg)) {
-      throw new Error("主图不是 JPEG。网页上的图片需要是 JPEG 格式才能合成动态照片。");
+      throw new Error(
+        "The primary image is not a JPEG. Web images must be JPEG to be assembled into a Motion Photo."
+      );
     }
 
     let video = videoBytes;
     if (!isMp4(video)) {
-      throw new Error("动态片段不是 MP4 容器。目前只支持 MP4/MOV 结构的视频。");
+      throw new Error(
+        "The motion segment is not an MP4 container. Only MP4/MOV videos are supported."
+      );
     }
 
     const warnings = [];
     const info = analyzeMp4(video);
-    if (!info.hasMoov) throw new Error("动态片段缺少 moov，无法作为 Motion Photo 视频段");
+    if (!info.hasMoov) {
+      throw new Error(
+        "The motion segment has no moov box and cannot be used as a Motion Photo video track."
+      );
+    }
 
     if (info.needsFaststart) {
       video = applyFaststart(video);
       if (!isMp4(video)) {
-        throw new Error("动态片段重排后结构校验失败，已中止以避免生成损坏文件");
+        throw new Error(
+          "Structural validation failed after reordering the motion segment; aborted to avoid producing a damaged file."
+        );
       }
-      warnings.push("视频 moov 位于文件尾部，已重排为可流式读取");
+      warnings.push("The video had moov at the end; it was moved to the front so the motion segment is streamable.");
     }
 
     let timestampUs = options.timestampUs;

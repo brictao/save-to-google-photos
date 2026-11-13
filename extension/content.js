@@ -141,9 +141,14 @@
     // Toast creation
     // --------------------------------------------------
     function createToast(type, title, message, autoDismiss = true) {
-        // 每次出现新提示都先清掉上一条 loading。
-        // 多步流程会连续创建多条 loading，只保留最新一条，
-        // 否则旧的加载卡片会一直堆在页面上。
+        // 多步流程和下载进度会连续推送 loading。同一条卡片原地更新文本，
+        // 比销毁重建稳定，也不会在页面上堆出多条。
+        if (type === "loading" && currentLoadingToast) {
+            updateToast(currentLoadingToast, title, message);
+            return currentLoadingToast;
+        }
+
+        // 非 loading 提示出现时，先清掉上一条 loading
         if (currentLoadingToast) {
             dismissToast(currentLoadingToast);
             currentLoadingToast = null;
@@ -187,14 +192,8 @@
 
         if (type === "loading") {
             currentLoadingToast = toast;
-
             // 兜底：后台异常中断时不要让加载卡片永久停留
-            setTimeout(() => {
-                if (currentLoadingToast === toast) {
-                    dismissToast(toast);
-                    currentLoadingToast = null;
-                }
-            }, 180000);
+            armLoadingTimeout(toast);
         }
 
         // Auto dismiss
@@ -207,11 +206,35 @@
 
     function dismissToast(toast) {
         if (!toast || !toast.parentNode) return;
+        if (toast.__sgpTimer) {
+            clearTimeout(toast.__sgpTimer);
+            toast.__sgpTimer = null;
+        }
         toast.classList.remove("sgp-show");
         toast.classList.add("sgp-hide");
         setTimeout(() => {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 400);
+    }
+
+    // 同一条 loading 卡片只更新文字，用于下载进度这类高频状态
+    function updateToast(toast, title, message) {
+        if (!toast || !toast.parentNode) return;
+        const titleEl = toast.querySelector(".sgp-toast-title");
+        const messageEl = toast.querySelector(".sgp-toast-message");
+        if (titleEl) titleEl.textContent = String(title);
+        if (messageEl) messageEl.textContent = String(message);
+        armLoadingTimeout(toast);
+    }
+
+    function armLoadingTimeout(toast) {
+        if (toast.__sgpTimer) clearTimeout(toast.__sgpTimer);
+        toast.__sgpTimer = setTimeout(() => {
+            if (currentLoadingToast === toast) {
+                dismissToast(toast);
+                currentLoadingToast = null;
+            }
+        }, 180000);
     }
 
     function escapeHtml(str) {
@@ -340,7 +363,7 @@
         }
 
         if (!img) {
-            return { found: false, reason: "页面上找不到这张图片元素" };
+            return { found: false, reason: "The image element could not be found on this page." };
         }
 
         const nearby = findNearbyVideo(img);
@@ -353,7 +376,7 @@
             return { found: false, candidates: guesses, via: "同名文件推导" };
         }
 
-        return { found: false, reason: "既没有配套视频元素，也无法从图片地址推导视频地址" };
+        return { found: false, reason: "No paired video element was found, and no video URL could be derived from the image URL." };
     }
 
     // 在视频附近查找封面图
@@ -401,12 +424,12 @@
         }
 
         if (!video) {
-            return { found: false, reason: "页面上找不到这个视频元素" };
+            return { found: false, reason: "The video element could not be found on this page." };
         }
 
         const cover = findCoverForVideo(video);
         if (!cover) {
-            return { found: false, reason: "视频附近找不到可用的封面图" };
+            return { found: false, reason: "No usable cover image was found near this video." };
         }
 
         return { found: true, imageUrl: cover.url, videoUrl: normalized, via: cover.via };
@@ -483,10 +506,10 @@
         }
 
         if (!videoUrl) {
-            return { found: false, reason: "没有找到这个 Live Photo 的视频地址。" };
+            return { found: false, reason: "No video URL was found for this Live Photo." };
         }
         if (!imageUrl) {
-            return { found: false, reason: "没有找到这个 Live Photo 的封面图。" };
+            return { found: false, reason: "No cover image was found for this Live Photo." };
         }
 
         return {
@@ -495,6 +518,79 @@
             videoUrl,
             via: react ? "页面组件数据" : "页面元素",
         };
+    }
+
+    // --------------------------------------------------
+    // 页面上下文抓字节：防盗链站点只认同源 Referer，
+    // 扩展进程的 fetch 会被 403，这里让页面自己发请求。
+    // --------------------------------------------------
+    const PAGE_FALLBACK_MAX_BYTES = 25 * 1024 * 1024;
+
+    async function fetchAsBase64(url) {
+        if (/^blob:/i.test(url)) {
+            return { ok: false, error: "blob URL" };
+        }
+
+        let response;
+        try {
+            response = await fetch(url, { credentials: "include" });
+        } catch {
+            return { ok: false, error: "network error" };
+        }
+
+        if (!response.ok) {
+            return { ok: false, error: `HTTP ${response.status}` };
+        }
+
+        const declared = Number(response.headers.get("content-length")) || 0;
+        if (declared > PAGE_FALLBACK_MAX_BYTES) {
+            return { ok: false, error: "file is too large to hand over from the page" };
+        }
+
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength > PAGE_FALLBACK_MAX_BYTES) {
+            return { ok: false, error: "file is too large to hand over from the page" };
+        }
+
+        return {
+            ok: true,
+            base64: bytesToBase64(new Uint8Array(buffer)),
+            mimeType: (response.headers.get("content-type") || "").split(";")[0].trim(),
+        };
+    }
+
+    function bytesToBase64(bytes) {
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary);
+    }
+
+    // --------------------------------------------------
+    // 批量保存：收集当前页面上足够大的图片，去重后交给后台
+    // --------------------------------------------------
+    function collectImages(limit = 20) {
+        const seen = new Set();
+        const items = [];
+
+        for (const img of Array.from(document.images)) {
+            const url = absoluteUrl(img.currentSrc || img.src);
+            if (!url || !/^https?:/i.test(url)) continue;
+
+            const width = img.naturalWidth || img.width || 0;
+            const height = img.naturalHeight || img.height || 0;
+            // 图标、头像、跟踪像素一律跳过
+            if (width < 300 || height < 300) continue;
+            if (seen.has(url)) continue;
+
+            seen.add(url);
+            items.push({ url, area: width * height });
+        }
+
+        items.sort((a, b) => b.area - a.area);
+        return { images: items.slice(0, limit).map((item) => item.url) };
     }
 
     // --------------------------------------------------
@@ -533,6 +629,24 @@
                 result = describeLivePhotoFromContext();
             } catch (err) {
                 result = { found: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
+        }
+
+        if (request.action === "fetchAsBase64") {
+            fetchAsBase64(request.url)
+                .then((result) => sendResponse(result))
+                .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+            return true;
+        }
+
+        if (request.action === "collectImages") {
+            let result;
+            try {
+                result = collectImages(request.limit || 20);
+            } catch (err) {
+                result = { images: [], error: err.message || String(err) };
             }
             sendResponse(result);
             return true;

@@ -84,6 +84,7 @@ const sandbox = {
   TextEncoder,
   console,
   setTimeout,
+  clearTimeout,
   requestAnimationFrame: (fn) => fn(),
 };
 sandbox.window = sandbox;
@@ -106,14 +107,19 @@ function send(type, title) {
 }
 
 async function run() {
-  // 多步流程：连续的 loading 应当互相替换
+  // 多步流程：连续的 loading 应当原地更新同一条卡片
   send("loading", "Looking for the pair…");
+  const firstLoading = getContainer().children[0];
   send("loading", "Building Live Photo…");
   send("loading", "Uploading…");
   await wait(600);
 
   const afterLoadings = loadingCount();
   check(afterLoadings === 1, "连续三条 loading 只保留一条", `当前 ${afterLoadings} 条`);
+  check(
+    getContainer().children[0] === firstLoading,
+    "进度更新复用同一条卡片，不重建节点"
+  );
 
   // 结果出现后不应当再有加载中的卡片
   send("success", "Live Photo Saved!");

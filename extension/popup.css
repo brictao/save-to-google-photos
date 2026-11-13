@@ -151,6 +151,104 @@ body {
   color: #fff;
 }
 
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-batch {
+  background: rgba(66, 133, 244, 0.14);
+  color: #9dc0fb;
+  border: 1px solid rgba(66, 133, 244, 0.3);
+}
+
+.btn-batch:hover {
+  background: rgba(66, 133, 244, 0.22);
+  color: #fff;
+}
+
+/* ---- Recent activity ---- */
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.link-btn:hover {
+  color: #fff;
+}
+
+.history-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.history-empty {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.history-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+}
+
+.history-item.status-saved {
+  border-left-color: #34A853;
+}
+
+.history-item.status-failed {
+  border-left-color: #EA4335;
+}
+
+.history-item.status-skipped {
+  border-left-color: #FBBC05;
+}
+
+.history-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 /* ---- Footer ---- */
 .footer {
   text-align: center;

@@ -6,10 +6,13 @@ A Chrome extension that lets you right-click any image on the web and save it di
 
 - 🖱️ **Right-click to save** — Simple context menu integration
 - 🔒 **Secure authentication** — Uses Google OAuth 2.0 via Chrome Identity API
-- 🔔 **Notifications** — Get instant feedback on upload status
+- 🔔 **Two feedback channels** — In-page progress toast, plus a system notification when an upload fails in the background
 - 🎨 **Premium UI** — Dark glassmorphism popup for auth management
-- 📷 **Wide format support** — JPEG, PNG, GIF, WebP, and more
+- 📷 **Images and videos** — JPEG, PNG, WebP, HEIC and GIF; MP4 and MOV videos
 - 🎞️ **Live Photo support** — Merges a page's photo and its paired video into one Google Motion Photo file, without re-encoding
+- 🗂️ **Batch saving** — Saves every large image on the current page from the popup
+- ♻️ **Duplicate guard** — Remembers what was already uploaded so a repeated click does not create a second copy
+- 🧾 **Local history** — Keeps the last 100 results on this device, including failure reasons
 
 ## Installation
 
@@ -52,6 +55,14 @@ A Chrome extension that lets you right-click any image on the web and save it di
 3. Select **Save to Google Photos**
 4. A notification will confirm the upload
 
+### Saving a video
+
+Right-click a video and choose **Save to Google Photos**. When the page exposes a matching still image, the video is packaged as a Live Photo; otherwise the video file itself is uploaded.
+
+### Saving every image on a page
+
+Open the popup and click **Save all images on this page**. Images smaller than 300×300 are skipped, repeated URLs are ignored, and up to 20 images are uploaded one at a time. The popup lists the result of each run, and the extension remembers what it already saved so a repeated right-click does not create a duplicate.
+
 ### Saving a Live Photo
 
 Right-click the still image and choose **Save Live Photo to Google Photos**. The extension looks for the paired video in two ways:
@@ -63,7 +74,7 @@ It then merges the JPEG still and the video into a single Google Motion Photo (`
 
 **Requirements and limits:**
 
-- The still image must be JPEG. HEIC stills cannot be decoded by Chrome, so those pages usually need to be reached through a client that already converts them.
+- The still image must be JPEG. Chrome cannot decode HEIC, so a HEIC cover is retried through the same URL with a JPEG format parameter before the extension reports that it cannot be used.
 - The video must be an MP4/MOV container. If `moov` sits at the end of the file, it is relocated to the front so the motion segment is streamable.
 - H.264 motion segments were verified end-to-end against the Google Photos API. HEVC segments are packaged the same way but have not been verified against Google Photos.
 - The extension never modifies or uploads the page's original files; everything happens on the fetched bytes.
@@ -94,7 +105,7 @@ save-to-google-photo/
 
 ## Privacy
 
-This extension does not collect, store, or share any personal data. Images are uploaded directly to your Google Photos account. See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for full details.
+This extension does not collect, store, or share any personal data. Images are uploaded directly to your Google Photos account. A local history of the last 100 upload results and up to 500 duplicate-detection fingerprints stay in `chrome.storage.local` on this device and are never sent anywhere. See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for full details.
 
 ## License
 

@@ -67,10 +67,13 @@ Just right-click any image on any web page and select "Save to Google Photos". T
 • Only "append" permission — cannot read or delete your photos
 
 📸 WIDE FORMAT SUPPORT
-Supports JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF, and more.
+Supports JPEG, PNG, WebP, HEIC and GIF images, plus MP4 and MOV videos. Pages with paired stills and videos can be saved as a single Motion Photo.
+
+🗂️ BATCH SAVING
+Save every large image on a page at once from the popup.
 
 🔔 INSTANT FEEDBACK
-Get real-time notifications when your image is saved successfully.
+Progress and results appear in the page. If an upload fails while the tab is in the background, you get a system notification with the reason.
 
 ✨ HOW IT WORKS
 1. Click the extension icon and sign in with your Google account
@@ -89,8 +92,9 @@ Get real-time notifications when your image is saved successfully.
    - **Permissions Justification**:
      - `contextMenus`: "Adds a 'Save to Google Photos' option to the right-click menu on images"
      - `identity`: "Authenticates with the user's Google account to access Google Photos API"
-     - `notifications`: "Shows upload status notifications (success or error)"
-     - `activeTab`: "Needed to access the image URL from the current page"
+     - `scripting`: "Injects the in-page status toast when a page has no content script yet"
+     - `storage`: "Keeps a local history of upload results and duplicate-detection fingerprints on this device"
+     - `notifications`: "Shows a system notification when an upload fails while the page is in the background"
      - `host_permissions (<all_urls>)`: "Needed to download images from any website"
      - `host_permissions (photoslibrary)`: "Communicates with Google Photos API to upload images"
 
