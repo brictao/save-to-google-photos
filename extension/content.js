@@ -778,161 +778,36 @@
         return out.slice(0, 4);
     }
 
-    // 把单个地址展开成「原图优先、原始地址兜底」的候选列表
-    function urlCandidates(url) {
-        const out = [];
-        const seen = new Set();
-        const push = (candidate) => {
-            if (!candidate || !/^https?:/i.test(candidate) || seen.has(candidate)) return;
-            seen.add(candidate);
-            out.push(candidate);
-        };
-
-        for (const candidate of xhsOriginalUrls(url)) push(candidate);
-        for (const candidate of [stripThumbnailParams(url), url]) push(candidate);
-
-        return out.slice(0, 4);
-    }
-
-    // 小红书笔记数据里的图片项有 urlDefault / urlPre / infoList 几种写法，
-    // 同一项通常还带 width / height，用来在选择面板里展示尺寸
-    function pickImageItem(item) {
-        if (typeof item === "string") return { url: item, width: 0, height: 0 };
-        if (!item || typeof item !== "object") return null;
-
-        const info = Array.isArray(item.infoList) ? item.infoList : [];
-        const urls = [
-            item.urlDefault,
-            item.url_default,
-            item.urlPre,
-            item.url_pre,
-            item.url,
-            info[0]?.url,
-            info[1]?.url,
-        ];
-
-        for (const url of urls) {
-            if (typeof url !== "string" || !/^https?:/i.test(url)) continue;
-            return {
-                url,
-                width: Number(item.width) || 0,
-                height: Number(item.height) || 0,
-            };
-        }
-        return null;
-    }
-
-    function imageListFrom(container) {
-        if (!container || typeof container !== "object") return null;
-
-        const candidates = [
-            container.imageList,
-            container.image_list,
-            container.images,
-            container.noteCard?.imageList,
-            container.noteCard?.image_list,
-            container.note?.noteCard?.imageList,
-        ];
-
-        for (const list of candidates) {
-            if (!Array.isArray(list) || !list.length) continue;
-            const entries = list.map(pickImageItem).filter(Boolean);
-            if (entries.length) return entries;
-        }
-        return null;
-    }
-
-    // 从 React fiber 向上查找当前笔记的完整图片列表
-    function readReactNoteImages(el) {
-        if (!el) return null;
-
-        const fiberKey = Object.keys(el).find(
-            (key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-        );
-        if (!fiberKey) return null;
-
-        let fiber = el[fiberKey];
-        let depth = 0;
-        while (fiber && depth < 60) {
-            const props = fiber.memoizedProps;
-            if (props && typeof props === "object") {
-                const containers = [
-                    props.note,
-                    props.data,
-                    props.noteCard,
-                    props.item,
-                    props.noteData,
-                    props.initialData,
-                    props.note?.noteCard,
-                    props.data?.noteCard,
-                    props.data?.note?.noteCard,
-                    props,
-                ];
-                for (const container of containers) {
-                    const urls = imageListFrom(container);
-                    if (urls) return urls;
-                }
-            }
-            fiber = fiber.return;
-            depth++;
-        }
-        return null;
-    }
-
-    function displayArea(el) {
-        const rect = el.getBoundingClientRect?.();
-        const width = Math.max(el.naturalWidth || 0, el.width || 0, Math.round(rect?.width || 0));
-        const height = Math.max(el.naturalHeight || 0, el.height || 0, Math.round(rect?.height || 0));
-        return width * height;
-    }
-
-    // 当前打开的多图帖子：优先弹窗内的图片，取面积最大的那张所在的笔记
-    function collectNoteImages() {
-        const images = Array.from(document.images || []);
-        if (!images.length) return { ok: false, reason: "No images were found on this page." };
-
-        const scoped = [];
+    // 小红书详情是页内浮层，打开后浮层里只有当前一张大图，背后的信息流
+    // 还挂着一串封面。浮层里能找到大图时只收浮层内的，避免收进无关封面。
+    function pickImagePool() {
+        const all = Array.from(document.images || []);
+        const nodes = [];
         for (const selector of ['[role="dialog"]', ".note-detail-mask", ".note-detail", ".note-container"]) {
             for (const node of Array.from(document.querySelectorAll(selector) || [])) {
-                scoped.push(...Array.from(node.querySelectorAll?.("img") || []));
+                nodes.push(node);
             }
         }
 
-        const pool = scoped.length ? scoped : images;
-        const sorted = pool
-            .map((img) => ({ img, area: displayArea(img) }))
-            .sort((a, b) => b.area - a.area);
-
-        for (const entry of sorted) {
-            const list = readReactNoteImages(entry.img);
-            if (!list || !list.length) continue;
-
-            const items = [];
-            const seen = new Set();
-            for (const raw of list) {
-                const candidates = urlCandidates(raw.url);
-                if (!candidates.length) continue;
-                if (seen.has(candidates[0])) continue;
-                seen.add(candidates[0]);
-                items.push({
-                    url: candidates[0],
-                    candidates,
-                    width: raw.width,
-                    height: raw.height,
-                });
-            }
-
-            if (items.length) return { ok: true, count: items.length, items };
+        for (const node of nodes) {
+            const inside = Array.from(node.querySelectorAll?.("img") || []);
+            const large = inside.filter((img) => {
+                const rect = img.getBoundingClientRect?.();
+                const width = Math.max(img.naturalWidth || 0, img.width || 0, Math.round(rect?.width || 0));
+                const height = Math.max(img.naturalHeight || 0, img.height || 0, Math.round(rect?.height || 0));
+                return width >= 300 && height >= 300;
+            });
+            if (large.length) return large;
         }
 
-        return { ok: false, reason: "No post image list was found. Open a post first." };
+        return all;
     }
 
     function collectImages(limit = 20) {
         const seen = new Set();
         const items = [];
 
-        for (const img of Array.from(document.images)) {
+        for (const img of pickImagePool()) {
             const candidates = imageCandidates(img);
             const primary = candidates[0];
             if (!primary) continue;
@@ -947,7 +822,16 @@
             if (seen.has(primary)) continue;
 
             seen.add(primary);
-            items.push({ url: primary, candidates, area: width * height, width, height });
+            items.push({
+                url: primary,
+                // 面板缩略图用页面真正加载成功的地址。原图候选是改写域名
+                // 猜出来的，浏览器直接 img 加载会被 CDN 拒绝，显示成破图。
+                displayUrl: absoluteUrl(img.currentSrc) || absoluteUrl(img.getAttribute?.("src")) || primary,
+                candidates,
+                area: width * height,
+                width,
+                height,
+            });
         }
 
         items.sort((a, b) => b.area - a.area);
@@ -980,10 +864,11 @@
 .sgp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #ececec; }
 .sgp-title { font-size: 15px; font-weight: 600; color: #111; }
 .sgp-count { font-size: 12px; color: #666; }
-.sgp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(134px, 1fr)); gap: 12px; padding: 16px 18px; overflow-y: auto; }
+.sgp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; padding: 16px 18px; overflow-y: auto; align-items: start; flex: 1; min-height: 0; }
 .sgp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
 .sgp-card.selected { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
-.sgp-thumb { width: 100%; height: 106px; object-fit: cover; display: block; background: #e8e8e8; }
+.sgp-thumb { width: 100%; height: auto; min-height: 48px; display: block; object-fit: contain; background: #e8e8e8; }
+.sgp-thumb.missing { height: 0; padding-top: 75%; }
 .sgp-meta { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 11px; color: #555; }
 .sgp-meta input { margin: 0; accent-color: #1a73e8; }
 .sgp-size { font-variant-numeric: tabular-nums; }
@@ -996,7 +881,7 @@
 .sgp-btn.link { border: none; background: none; color: #1a73e8; padding: 7px 6px; }
 `;
 
-    function renderPicker(items, mode) {
+    function renderPicker(items) {
         closePicker();
 
         // 站点自己的浮层常见 z-index 在十万级，这里压到最大值并固定定位，
@@ -1023,7 +908,7 @@
 
         const title = document.createElement("div");
         title.className = "sgp-title";
-        title.textContent = mode === "note" ? "Images in this post" : "Images on this page";
+        title.textContent = "Images on this page";
 
         const count = document.createElement("div");
         count.className = "sgp-count";
@@ -1044,10 +929,31 @@
             thumb.loading = "lazy";
             thumb.decoding = "async";
             thumb.alt = "";
-            thumb.src = item.url;
+            // 按图片自身宽高比占位，加载前后都不会跳版
+            if (item.width > 0 && item.height > 0) {
+                thumb.style.aspectRatio = `${item.width} / ${item.height}`;
+            }
+            // 页面渲染地址排在前面，猜出来的原图候选留在后面。CDN 拒绝
+            // 某个域时依次往下退，全都失败才显示占位块。
+            const sources = [];
+            for (const url of [item.displayUrl, item.url, ...(item.candidates || [])]) {
+                if (url && !sources.includes(url)) sources.push(url);
+            }
+
+            let sourceIndex = 0;
+            const applySource = () => {
+                thumb.src = sources[sourceIndex];
+            };
             thumb.addEventListener("error", () => {
+                if (sourceIndex + 1 < sources.length) {
+                    sourceIndex += 1;
+                    applySource();
+                    return;
+                }
                 thumb.removeAttribute("src");
+                thumb.classList.add("missing");
             });
+            applySource();
 
             const meta = document.createElement("div");
             meta.className = "sgp-meta";
@@ -1147,31 +1053,19 @@
         return { ok: true, count: items.length };
     }
 
-    function openPicker(mode) {
+    function openPicker() {
         closePicker();
 
-        let items = [];
-        let emptyReason = "No images were found on this page.";
-
-        if (mode === "note") {
-            const note = collectNoteImages();
-            if (note.ok && note.items?.length) {
-                items = note.items;
-            } else {
-                emptyReason = note.reason || emptyReason;
-            }
-        } else {
-            const page = collectImages(60);
-            items = page.items || [];
-            if (!items.length) emptyReason = "No large images were found on this page.";
-        }
+        const collected = collectImages(60);
+        const items = collected.items || [];
 
         if (!items.length) {
-            createToast("error", "Nothing to save", emptyReason);
-            return { ok: false, reason: emptyReason };
+            const reason = "No large images were found on this page.";
+            createToast("error", "Nothing to save", reason);
+            return { ok: false, reason };
         }
 
-        return renderPicker(items, mode);
+        return renderPicker(items);
     }
 
     // --------------------------------------------------
@@ -1236,18 +1130,7 @@
         if (request.action === "openPicker") {
             let result;
             try {
-                result = openPicker(request.mode === "note" ? "note" : "page");
-            } catch (err) {
-                result = { ok: false, reason: err.message || String(err) };
-            }
-            sendResponse(result);
-            return true;
-        }
-
-        if (request.action === "collectNoteImages") {
-            let result;
-            try {
-                result = collectNoteImages();
+                result = openPicker();
             } catch (err) {
                 result = { ok: false, reason: err.message || String(err) };
             }

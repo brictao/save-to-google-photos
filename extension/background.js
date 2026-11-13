@@ -1025,41 +1025,6 @@ async function runBatch(tabId, entries, emptyMessage) {
   return counts;
 }
 
-// 保存当前帖子里的全部图片。小红书的详情是页内弹窗，信息流只给首图，
-// 完整列表只存在于组件数据里。
-async function saveNoteImages(tabId) {
-  const listed = await requestNoteImages(tabId);
-
-  if (!listed || !listed.ok) {
-    showToast(
-      tabId,
-      "error",
-      "No post detected",
-      listed?.reason || "Open a post first, then try again."
-    );
-    return { total: 0, saved: 0, skipped: 0, failed: 0 };
-  }
-
-  const entries = (listed.items || [])
-    .filter((item) => item && typeof item.url === "string")
-    .slice(0, 40);
-
-  return runBatch(tabId, entries, "This post has no images.");
-}
-
-function requestNoteImages(tabId) {
-  const message = { action: "collectNoteImages" };
-
-  return chrome.tabs
-    .sendMessage(tabId, message)
-    .catch(() =>
-      chrome.scripting
-        .executeScript({ target: { tabId }, files: ["content.js"] })
-        .then(() => chrome.tabs.sendMessage(tabId, message))
-    )
-    .catch(() => null);
-}
-
 // 用户在选择面板里勾选后提交的图片
 async function saveSelectedItems(tabId, items) {
   const entries = (Array.isArray(items) ? items : [])
@@ -1321,13 +1286,6 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       return true;
     }
     saveSelectedItems(tabId, request.items)
-      .then((counts) => sendResponse({ success: true, counts }))
-      .catch((err) => sendResponse({ success: false, error: err.message }));
-    return true;
-  }
-
-  if (request.action === "saveNoteImages") {
-    saveNoteImages(request.tabId)
       .then((counts) => sendResponse({ success: true, counts }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;

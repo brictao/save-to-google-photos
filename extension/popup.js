@@ -8,33 +8,16 @@ const statusHint = document.getElementById("statusHint");
 const signInBtn = document.getElementById("signInBtn");
 const signOutBtn = document.getElementById("signOutBtn");
 const saveAllBtn = document.getElementById("saveAllBtn");
-const saveNoteBtn = document.getElementById("saveNoteBtn");
 const historyList = document.getElementById("historyList");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 let signedIn = false;
-// 帖子级保存只对有多图详情页的站点开放，避免在别的站点给出无用入口
-let noteSupported = false;
 
 const STATUS_LABEL = {
     saved: "Saved",
     failed: "Failed",
     skipped: "Skipped",
 };
-
-// --------------------------------------------------
-// 当前标签页是否支持帖子级保存
-// --------------------------------------------------
-async function detectNoteSite() {
-    try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        const url = tabs?.[0]?.url || "";
-        noteSupported = /(^|\.)xiaohongshu\.com$/i.test(new URL(url).hostname);
-    } catch {
-        noteSupported = false;
-    }
-    saveNoteBtn.style.display = signedIn && noteSupported ? "flex" : "none";
-}
 
 // --------------------------------------------------
 // Check auth status on popup open
@@ -68,8 +51,6 @@ function setSignedIn() {
     signOutBtn.style.display = "flex";
     saveAllBtn.style.display = "flex";
     saveAllBtn.disabled = false;
-    saveNoteBtn.style.display = noteSupported ? "flex" : "none";
-    saveNoteBtn.disabled = false;
 }
 
 function setSignedOut() {
@@ -80,7 +61,6 @@ function setSignedOut() {
     signInBtn.style.display = "flex";
     signOutBtn.style.display = "none";
     saveAllBtn.style.display = "none";
-    saveNoteBtn.style.display = "none";
 }
 
 function setLoading(text) {
@@ -90,7 +70,6 @@ function setLoading(text) {
     signInBtn.style.display = "none";
     signOutBtn.style.display = "none";
     saveAllBtn.style.display = signedIn ? "flex" : "none";
-    saveNoteBtn.style.display = signedIn && noteSupported ? "flex" : "none";
 }
 
 // --------------------------------------------------
@@ -126,7 +105,7 @@ signOutBtn.addEventListener("click", async () => {
 });
 
 // 在页面里打开选择面板，由用户勾选后再保存
-async function openPickerFromPopup(button, mode) {
+async function openPickerFromPopup(button) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id) {
@@ -135,7 +114,7 @@ async function openPickerFromPopup(button, mode) {
     }
 
     button.disabled = true;
-    const message = { action: "openPicker", mode };
+    const message = { action: "openPicker" };
 
     try {
         await chrome.tabs.sendMessage(tab.id, message);
@@ -156,8 +135,7 @@ async function openPickerFromPopup(button, mode) {
     window.close();
 }
 
-saveAllBtn.addEventListener("click", () => openPickerFromPopup(saveAllBtn, "page"));
-saveNoteBtn.addEventListener("click", () => openPickerFromPopup(saveNoteBtn, "note"));
+saveAllBtn.addEventListener("click", () => openPickerFromPopup(saveAllBtn));
 
 clearHistoryBtn.addEventListener("click", async () => {
     try {
@@ -241,6 +219,5 @@ function sendMessage(msg) {
 // 启动时注册，漏注册时用户可以靠打开 popup 自愈，不必重装扩展。
 sendMessage({ action: "ensureMenus" }).catch(() => {});
 
-detectNoteSite();
 checkAuthStatus();
 loadHistory();

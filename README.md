@@ -67,11 +67,9 @@ Right-click a video and choose **Save to Google Photos**. Videos longer than 10 
 
 ### Choosing images on a page
 
-Open the popup and click **Choose images on this page**. A picker opens inside the page, showing every candidate image as a thumbnail with its pixel dimensions underneath. Everything is selected by default; uncheck what you do not want, then click Save. For each image the extension prefers the largest `srcset` candidate, falls back to `data-*` lazy-load URLs, and strips CDN resize parameters (Qiniu `imageView2` / `imageMogr2`) while keeping the format segment, so the full-size file is uploaded instead of the grid thumbnail. Each entry keeps its original URL as a fallback when the cleaned one fails. Images smaller than 300×300 are skipped and repeated URLs are ignored. The extension remembers what it already saved so a repeated right-click does not create a duplicate.
+Open the popup and click **Choose images on this page**. A picker opens inside the page, showing every candidate image as a thumbnail with its pixel dimensions underneath. Thumbnails keep each image's own aspect ratio, so a portrait shot is tall and a panorama is wide. Everything is selected by default; uncheck what you do not want, then click Save. For each image the extension prefers the largest `srcset` candidate, falls back to `data-*` lazy-load URLs, and strips CDN resize parameters (Qiniu `imageView2` / `imageMogr2`) while keeping the format segment, so the full-size file is uploaded instead of the grid thumbnail. Each entry keeps its original URL as a fallback when the cleaned one fails. The thumbnail itself loads the address the page already rendered, since guessed original-image hosts are often rejected by the CDN; if that fails it walks the download candidates in order. Images smaller than 300×300 are skipped and repeated URLs are ignored. The extension remembers what it already saved so a repeated right-click does not create a duplicate.
 
-### Choosing images in a post
-
-Xiaohongshu opens a post inside an in-page modal, and the feed only renders the cover image. Open the post, then click **Choose images in this post** in the popup. The extension reads the post's complete image list from the React component data on the open modal, converts every entry to the original `sns-img` URL, and lists each one with its dimensions. Pick the ones you want and save. The button only appears on Xiaohongshu; other sites keep the page-level button. Right-click still saves exactly the one image you clicked.
+When a site renders a post inside an in-page modal, the picker only lists images inside that modal, so the feed covers behind it are not collected. The modal has to be open when you click the button.
 
 ### Saving a Live Photo
 
