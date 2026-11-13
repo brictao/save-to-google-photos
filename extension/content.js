@@ -826,6 +826,9 @@
                 // 面板缩略图用页面真正加载成功的地址。原图候选是改写域名
                 // 猜出来的，浏览器直接 img 加载会被 CDN 拒绝，显示成破图。
                 displayUrl: absoluteUrl(img.currentSrc) || absoluteUrl(img.getAttribute?.("src")) || primary,
+                // 原图在页面上是带站点自己的请求策略加载成功的，面板重发请求
+                // 时沿用同一策略，否则部分 CDN 会因为 Referer 不同而拒绝。
+                referrerPolicy: img.referrerPolicy || "",
                 candidates,
                 area: width * height,
                 width,
@@ -930,6 +933,7 @@
 .sgp-card.selected { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
 .sgp-thumb { width: 100%; height: auto; display: block; object-fit: contain; background: #e8e8e8; }
 .sgp-thumb.missing { min-height: 48px; }
+.sgp-preview-note { padding: 0 8px 8px; color: #8a6d3b; font-size: 11px; line-height: 1.4; }
 .sgp-preview { position: relative; }
 .sgp-play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #ffffff80; border-radius: 24px; padding: 10px 14px; background: #152333cc; color: #fff; font: 13px system-ui, sans-serif; cursor: pointer; }
 .sgp-play[hidden] { display: none; }
@@ -1026,16 +1030,47 @@
                     if (url && !sources.includes(url)) sources.push(url);
                 }
                 let sourceIndex = 0;
-                const applySource = () => { thumb.src = sources[sourceIndex]; };
+                // 每个地址先按原策略请求，再退到不带 Referer 重试，最后才换地址。
+                // 不能直接跳到候选地址：候选里的原图域是猜出来的，未必存在。
+                let policies = [];
+                let policyIndex = 0;
+                let previewNote = null;
+                const resetPolicies = () => {
+                    policies = item.referrerPolicy === "no-referrer"
+                        ? ["no-referrer"]
+                        : [item.referrerPolicy || "", "no-referrer"];
+                    policyIndex = 0;
+                };
+                const applySource = () => {
+                    const policy = policies[policyIndex];
+                    if (policy) thumb.setAttribute("referrerpolicy", policy);
+                    else thumb.removeAttribute("referrerpolicy");
+                    thumb.src = sources[sourceIndex];
+                };
+                const showPreviewFailure = () => {
+                    thumb.removeAttribute("src");
+                    thumb.classList.add("missing");
+                    if (previewNote) return;
+                    previewNote = document.createElement("div");
+                    previewNote.className = "sgp-preview-note";
+                    previewNote.textContent = "Preview unavailable. You can still select and save this image.";
+                    card.appendChild(previewNote);
+                };
                 thumb.addEventListener("error", () => {
-                    if (sourceIndex + 1 < sources.length) {
-                        sourceIndex += 1;
+                    if (policyIndex + 1 < policies.length) {
+                        policyIndex += 1;
                         applySource();
                         return;
                     }
-                    thumb.removeAttribute("src");
-                    thumb.classList.add("missing");
+                    if (sourceIndex + 1 < sources.length) {
+                        sourceIndex += 1;
+                        resetPolicies();
+                        applySource();
+                        return;
+                    }
+                    showPreviewFailure();
                 });
+                resetPolicies();
                 applySource();
             }
 
