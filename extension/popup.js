@@ -125,60 +125,39 @@ signOutBtn.addEventListener("click", async () => {
     setSignedOut();
 });
 
-async function runPopupBatch(button, action, params, loadingText) {
+// 在页面里打开选择面板，由用户勾选后再保存
+async function openPickerFromPopup(button, mode) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs && tabs[0];
     if (!tab || !tab.id) {
-        statusHint.textContent = "No active tab to read images from.";
+        statusHint.textContent = "No active tab to use.";
         return;
     }
 
     button.disabled = true;
-    setLoading(loadingText);
-
-    let title = "Batch finished";
-    let hint = "";
+    const message = { action: "openPicker", mode };
 
     try {
-        const response = await sendMessage({ action, tabId: tab.id, ...params });
-
-        if (response.success) {
-            const counts = response.counts || {};
-            if (!counts.total) {
-                title = "Nothing to save";
-                hint = "The page did not expose any usable images.";
-            } else {
-                hint = `${counts.saved || 0} saved, ${counts.skipped || 0} skipped, ${counts.failed || 0} failed.`;
-            }
-        } else {
-            title = "Batch failed";
-            hint = response.error || "The page did not expose any usable images.";
+        await chrome.tabs.sendMessage(tab.id, message);
+    } catch {
+        try {
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                files: ["content.js"],
+            });
+            await chrome.tabs.sendMessage(tab.id, message);
+        } catch (err) {
+            button.disabled = false;
+            statusHint.textContent = err.message || "Cannot reach this page.";
+            return;
         }
-    } catch (err) {
-        title = "Batch failed";
-        hint = err.message || "Please try again.";
     }
 
-    // 批量结束后恢复登录态按钮，否则 Sign Out 会一直是隐藏的
-    if (signedIn) {
-        setSignedIn();
-    } else {
-        setSignedOut();
-    }
-    statusText.textContent = title;
-    statusHint.textContent = hint;
-
-    button.disabled = false;
-    loadHistory();
+    window.close();
 }
 
-saveAllBtn.addEventListener("click", () =>
-    runPopupBatch(saveAllBtn, "saveAllImages", { limit: 20 }, "Saving images…")
-);
-
-saveNoteBtn.addEventListener("click", () =>
-    runPopupBatch(saveNoteBtn, "saveNoteImages", {}, "Saving this post…")
-);
+saveAllBtn.addEventListener("click", () => openPickerFromPopup(saveAllBtn, "page"));
+saveNoteBtn.addEventListener("click", () => openPickerFromPopup(saveNoteBtn, "note"));
 
 clearHistoryBtn.addEventListener("click", async () => {
     try {

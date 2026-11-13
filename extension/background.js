@@ -1060,6 +1060,22 @@ function requestNoteImages(tabId) {
     .catch(() => null);
 }
 
+// 用户在选择面板里勾选后提交的图片
+async function saveSelectedItems(tabId, items) {
+  const entries = (Array.isArray(items) ? items : [])
+    .filter((item) => item && typeof item.url === "string")
+    .slice(0, 60)
+    .map((item) => ({
+      url: item.url,
+      candidates:
+        Array.isArray(item.candidates) && item.candidates.length
+          ? item.candidates
+          : [item.url],
+    }));
+
+  return runBatch(tabId, entries, "No images were selected.");
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1293,6 +1309,18 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request.action === "saveAllImages") {
     saveAllImages(request.tabId, request.limit)
+      .then((counts) => sendResponse({ success: true, counts }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "saveSelectedItems") {
+    const tabId = _sender?.tab?.id;
+    if (!tabId) {
+      sendResponse({ success: false, error: "No active tab." });
+      return true;
+    }
+    saveSelectedItems(tabId, request.items)
       .then((counts) => sendResponse({ success: true, counts }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;

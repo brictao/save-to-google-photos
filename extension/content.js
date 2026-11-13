@@ -794,9 +794,10 @@
         return out.slice(0, 4);
     }
 
-    // 小红书笔记数据里的图片项有 urlDefault / urlPre / infoList 几种写法
-    function pickImageUrl(item) {
-        if (typeof item === "string") return item;
+    // 小红书笔记数据里的图片项有 urlDefault / urlPre / infoList 几种写法，
+    // 同一项通常还带 width / height，用来在选择面板里展示尺寸
+    function pickImageItem(item) {
+        if (typeof item === "string") return { url: item, width: 0, height: 0 };
         if (!item || typeof item !== "object") return null;
 
         const info = Array.isArray(item.infoList) ? item.infoList : [];
@@ -811,7 +812,12 @@
         ];
 
         for (const url of urls) {
-            if (typeof url === "string" && /^https?:/i.test(url)) return url;
+            if (typeof url !== "string" || !/^https?:/i.test(url)) continue;
+            return {
+                url,
+                width: Number(item.width) || 0,
+                height: Number(item.height) || 0,
+            };
         }
         return null;
     }
@@ -830,8 +836,8 @@
 
         for (const list of candidates) {
             if (!Array.isArray(list) || !list.length) continue;
-            const urls = list.map(pickImageUrl).filter(Boolean);
-            if (urls.length) return urls;
+            const entries = list.map(pickImageItem).filter(Boolean);
+            if (entries.length) return entries;
         }
         return null;
     }
@@ -898,17 +904,22 @@
             .sort((a, b) => b.area - a.area);
 
         for (const entry of sorted) {
-            const urls = readReactNoteImages(entry.img);
-            if (!urls || !urls.length) continue;
+            const list = readReactNoteImages(entry.img);
+            if (!list || !list.length) continue;
 
             const items = [];
             const seen = new Set();
-            for (const raw of urls) {
-                const candidates = urlCandidates(raw);
+            for (const raw of list) {
+                const candidates = urlCandidates(raw.url);
                 if (!candidates.length) continue;
                 if (seen.has(candidates[0])) continue;
                 seen.add(candidates[0]);
-                items.push({ url: candidates[0], candidates });
+                items.push({
+                    url: candidates[0],
+                    candidates,
+                    width: raw.width,
+                    height: raw.height,
+                });
             }
 
             if (items.length) return { ok: true, count: items.length, items };
@@ -936,7 +947,7 @@
             if (seen.has(primary)) continue;
 
             seen.add(primary);
-            items.push({ url: primary, candidates, area: width * height });
+            items.push({ url: primary, candidates, area: width * height, width, height });
         }
 
         items.sort((a, b) => b.area - a.area);
@@ -946,6 +957,221 @@
             images: picked.map((item) => item.url),
             items: picked,
         };
+    }
+
+    // --------------------------------------------------
+    // 图片选择面板：注入到页面内的覆盖层
+    // --------------------------------------------------
+    const PICKER_HOST_ID = "sgp-picker-host";
+
+    function closePicker() {
+        const existing = document.getElementById?.(PICKER_HOST_ID);
+        if (existing) existing.remove();
+    }
+
+    function formatDimensions(item) {
+        if (!item.width || !item.height) return "size unknown";
+        return `${item.width} × ${item.height}`;
+    }
+
+    const PICKER_STYLE = `
+.sgp-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+.sgp-panel { width: min(940px, 100%); max-height: 86vh; background: #fff; border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.sgp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #ececec; }
+.sgp-title { font-size: 15px; font-weight: 600; color: #111; }
+.sgp-count { font-size: 12px; color: #666; }
+.sgp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(134px, 1fr)); gap: 12px; padding: 16px 18px; overflow-y: auto; }
+.sgp-card { border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.sgp-card.selected { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
+.sgp-thumb { width: 100%; height: 106px; object-fit: cover; display: block; background: #e8e8e8; }
+.sgp-meta { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 11px; color: #555; }
+.sgp-meta input { margin: 0; accent-color: #1a73e8; }
+.sgp-size { font-variant-numeric: tabular-nums; }
+.sgp-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-top: 1px solid #ececec; }
+.sgp-spacer { flex: 1; }
+.sgp-btn { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid #d5d5d5; background: #fff; color: #222; cursor: pointer; }
+.sgp-btn:hover { background: #f4f4f4; }
+.sgp-btn.primary { background: #1a73e8; border-color: #1a73e8; color: #fff; font-weight: 600; }
+.sgp-btn.primary:hover { background: #1667d0; }
+.sgp-btn.link { border: none; background: none; color: #1a73e8; padding: 7px 6px; }
+`;
+
+    function renderPicker(items, mode) {
+        closePicker();
+
+        // 站点自己的浮层常见 z-index 在十万级，这里压到最大值并固定定位，
+        // 否则面板会被评论框、悬浮工具栏之类盖住
+        const host = document.createElement("div");
+        host.id = PICKER_HOST_ID;
+        host.style.position = "fixed";
+        host.style.inset = "0";
+        host.style.zIndex = "2147483647";
+
+        const shadow = host.attachShadow({ mode: "open" });
+        const styleEl = document.createElement("style");
+        styleEl.textContent = PICKER_STYLE;
+        shadow.appendChild(styleEl);
+
+        const overlay = document.createElement("div");
+        overlay.className = "sgp-overlay";
+
+        const panel = document.createElement("div");
+        panel.className = "sgp-panel";
+
+        const head = document.createElement("div");
+        head.className = "sgp-head";
+
+        const title = document.createElement("div");
+        title.className = "sgp-title";
+        title.textContent = mode === "note" ? "Images in this post" : "Images on this page";
+
+        const count = document.createElement("div");
+        count.className = "sgp-count";
+
+        head.appendChild(title);
+        head.appendChild(count);
+
+        const grid = document.createElement("div");
+        grid.className = "sgp-grid";
+
+        const boxes = [];
+        for (const item of items) {
+            const card = document.createElement("div");
+            card.className = "sgp-card selected";
+
+            const thumb = document.createElement("img");
+            thumb.className = "sgp-thumb";
+            thumb.loading = "lazy";
+            thumb.decoding = "async";
+            thumb.alt = "";
+            thumb.src = item.url;
+            thumb.addEventListener("error", () => {
+                thumb.removeAttribute("src");
+            });
+
+            const meta = document.createElement("div");
+            meta.className = "sgp-meta";
+
+            const box = document.createElement("input");
+            box.type = "checkbox";
+            box.checked = true;
+
+            const size = document.createElement("span");
+            size.className = "sgp-size";
+            size.textContent = formatDimensions(item);
+
+            meta.appendChild(box);
+            meta.appendChild(size);
+            card.appendChild(thumb);
+            card.appendChild(meta);
+            grid.appendChild(card);
+
+            boxes.push(box);
+
+            const sync = () => {
+                card.classList.toggle("selected", box.checked);
+                updateCount();
+            };
+            box.addEventListener("change", sync);
+            card.addEventListener("click", (event) => {
+                if (event.target === box) return;
+                box.checked = !box.checked;
+                sync();
+            });
+        }
+
+        const foot = document.createElement("div");
+        foot.className = "sgp-foot";
+
+        const selectAll = document.createElement("button");
+        selectAll.className = "sgp-btn link";
+        selectAll.textContent = "Select all";
+
+        const selectNone = document.createElement("button");
+        selectNone.className = "sgp-btn link";
+        selectNone.textContent = "Select none";
+
+        const spacer = document.createElement("div");
+        spacer.className = "sgp-spacer";
+
+        const cancel = document.createElement("button");
+        cancel.className = "sgp-btn";
+        cancel.textContent = "Cancel";
+
+        const save = document.createElement("button");
+        save.className = "sgp-btn primary";
+
+        foot.appendChild(selectAll);
+        foot.appendChild(selectNone);
+        foot.appendChild(spacer);
+        foot.appendChild(cancel);
+        foot.appendChild(save);
+
+        panel.appendChild(head);
+        panel.appendChild(grid);
+        panel.appendChild(foot);
+        overlay.appendChild(panel);
+        shadow.appendChild(overlay);
+        document.documentElement.appendChild(host);
+
+        function updateCount() {
+            const selected = boxes.filter((box) => box.checked).length;
+            count.textContent = `${selected} of ${items.length} selected`;
+            save.textContent = selected ? `Save ${selected}` : "Save";
+            save.disabled = !selected;
+        }
+
+        function setAll(checked) {
+            boxes.forEach((box, index) => {
+                box.checked = checked;
+                grid.children[index]?.classList.toggle("selected", checked);
+            });
+            updateCount();
+        }
+
+        selectAll.addEventListener("click", () => setAll(true));
+        selectNone.addEventListener("click", () => setAll(false));
+        cancel.addEventListener("click", closePicker);
+        overlay.addEventListener("click", (event) => {
+            if (event.target === overlay) closePicker();
+        });
+
+        save.addEventListener("click", () => {
+            const chosen = items.filter((_, index) => boxes[index].checked);
+            if (!chosen.length) return;
+            closePicker();
+            chrome.runtime.sendMessage({ action: "saveSelectedItems", items: chosen });
+        });
+
+        updateCount();
+        return { ok: true, count: items.length };
+    }
+
+    function openPicker(mode) {
+        closePicker();
+
+        let items = [];
+        let emptyReason = "No images were found on this page.";
+
+        if (mode === "note") {
+            const note = collectNoteImages();
+            if (note.ok && note.items?.length) {
+                items = note.items;
+            } else {
+                emptyReason = note.reason || emptyReason;
+            }
+        } else {
+            const page = collectImages(60);
+            items = page.items || [];
+            if (!items.length) emptyReason = "No large images were found on this page.";
+        }
+
+        if (!items.length) {
+            createToast("error", "Nothing to save", emptyReason);
+            return { ok: false, reason: emptyReason };
+        }
+
+        return renderPicker(items, mode);
     }
 
     // --------------------------------------------------
@@ -1000,6 +1226,17 @@
             let result;
             try {
                 result = resolveAtCursor();
+            } catch (err) {
+                result = { ok: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
+        }
+
+        if (request.action === "openPicker") {
+            let result;
+            try {
+                result = openPicker(request.mode === "note" ? "note" : "page");
             } catch (err) {
                 result = { ok: false, reason: err.message || String(err) };
             }
