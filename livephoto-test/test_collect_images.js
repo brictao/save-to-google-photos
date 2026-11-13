@@ -117,6 +117,12 @@ const images = [
     width: 400,
     height: 300,
   }),
+  // 小红书预览域：应换成原图域并去掉 webp 样式
+  makeImg({
+    currentSrc: "https://sns-webpic-qc.xhscdn.com/202401/note!nd_dft_wlteh_webp_3",
+    width: 1080,
+    height: 1440,
+  }),
   // 懒加载：真实地址在 data-src 里
   makeImg({
     currentSrc: "https://cdn.example.com/placeholder.jpg",
@@ -200,6 +206,13 @@ check(
   "原始缩略地址保留为回退候选",
   items.some((item) => (item.candidates || []).some((c) => c.includes("imageView2/2/w/400"))),
   items.find((item) => item.url.includes("thumb.jpg"))?.candidates?.join(" | ") || "none"
+);
+
+// 小红书预览域
+check(
+  "小红书预览地址换成原图域",
+  urls.includes("https://sns-img-qc.xhscdn.com/202401/note"),
+  urls.filter((u) => u.includes("xhscdn")).join(" | ")
 );
 
 // srcset 与懒加载

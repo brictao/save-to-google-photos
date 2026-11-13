@@ -721,7 +721,33 @@
         return mediaAtPoint(lastContextPoint.x, lastContextPoint.y);
     }
 
-    // 按可信度排列候选地址：去参数的在前，原始地址留作回退
+    // 小红书 CDN：sns-webpic 是预览域，sns-img 是原图域，路径末尾的
+    // !<style>（如 !nd_dft_wlteh_webp_3）是 webp 转码样式。两者都会压低
+    // 分辨率，换成原图域并去掉样式后才是原图。
+    function xhsOriginalUrls(url) {
+        try {
+            const parsed = new URL(url);
+            if (!/(^|\.)xhscdn\.com$/i.test(parsed.hostname)) return [];
+
+            const path = parsed.pathname.replace(/![^/]*$/, "");
+            const hosts = [];
+            if (/^sns-webpic/i.test(parsed.hostname)) {
+                hosts.push(parsed.hostname.replace(/^sns-webpic/i, "sns-img"));
+            }
+            hosts.push(parsed.hostname);
+
+            const out = [];
+            for (const host of hosts) {
+                const candidate = `${parsed.protocol}//${host}${path}`;
+                if (candidate !== url && !out.includes(candidate)) out.push(candidate);
+            }
+            return out;
+        } catch {
+            return [];
+        }
+    }
+
+    // 按可信度排列候选地址：原图在前，去参数的次之，原始地址留作回退
     function imageCandidates(img) {
         const raw = [
             largestSrcsetUrl(img),
@@ -734,6 +760,14 @@
         const seen = new Set();
 
         for (const url of raw) {
+            for (const candidate of xhsOriginalUrls(url)) {
+                if (seen.has(candidate)) continue;
+                seen.add(candidate);
+                out.push(candidate);
+            }
+        }
+
+        for (const url of raw) {
             for (const candidate of [stripThumbnailParams(url), url]) {
                 if (!/^https?:/i.test(candidate) || seen.has(candidate)) continue;
                 seen.add(candidate);
@@ -741,7 +775,7 @@
             }
         }
 
-        return out.slice(0, 3);
+        return out.slice(0, 4);
     }
 
     function collectImages(limit = 20) {

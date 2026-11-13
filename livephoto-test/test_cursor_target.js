@@ -80,7 +80,7 @@ function makeImg(options) {
 
 // 小红书/Instagram 的典型结构：图片上面盖一层链接或遮罩
 const photo = makeImg({
-  currentSrc: "https://sns-img.xhscdn.com/note/abc.jpg?imageView2/2/w/540/q/90",
+  currentSrc: "https://sns-webpic-qc.xhscdn.com/202401/abc!nd_dft_wlteh_webp_3",
 });
 const mask = makeEl("div");
 mask.__bg = "linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0))";
@@ -177,13 +177,15 @@ rightClick(10, 10);
 const throughMask = ask();
 check("穿过覆盖层找到下层图片", throughMask?.ok === true && throughMask?.kind === "image");
 check(
-  "缩略参数被剥离",
-  throughMask?.url === "https://sns-img.xhscdn.com/note/abc.jpg",
+  "小红书预览地址换成原图域",
+  throughMask?.url === "https://sns-img-qc.xhscdn.com/202401/abc",
   throughMask?.url
 );
 check(
-  "原始缩略地址留作回退",
-  (throughMask?.candidates || []).some((u) => u.includes("imageView2/2/w/540")),
+  "原始预览地址留作回退",
+  (throughMask?.candidates || []).includes(
+    "https://sns-webpic-qc.xhscdn.com/202401/abc!nd_dft_wlteh_webp_3"
+  ),
   (throughMask?.candidates || []).join(" | ")
 );
 

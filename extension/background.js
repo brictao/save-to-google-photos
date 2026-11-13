@@ -165,10 +165,14 @@ async function handleSaveAtCursor(tab) {
     return;
   }
 
-  await saveWithCandidates(tabId, {
-    url: target.url,
-    candidates: target.candidates || [target.url],
-  });
+  await saveWithCandidates(
+    tabId,
+    {
+      url: target.url,
+      candidates: target.candidates || [target.url],
+    },
+    { quiet: false }
+  );
 }
 
 function requestAtCursor(tabId) {
@@ -196,6 +200,7 @@ async function handleSingleMedia(tabId, url, kind) {
 async function saveOne(tabId, url, kind, options = {}) {
   const label = kind === "video" ? "video" : "image";
   const quiet = options.quiet === true;
+  const quietFailure = options.quietFailure === true;
 
   try {
     if (!quiet) {
@@ -277,12 +282,12 @@ async function saveOne(tabId, url, kind, options = {}) {
         message,
       });
     }
-    if (!quiet) {
+    if (!quiet && !quietFailure) {
       showToast(tabId, "error", "Save Failed", message);
     }
     // 失败时补一条系统通知，用户切走标签页也能看到原因。
     // 批量模式下只在最后汇总一条，避免 20 张图弹 20 条。
-    if (!quiet) {
+    if (!quiet && !quietFailure) {
       await notifyFailureWhenHidden(tabId, `Could not save ${label}`, message);
     }
     return "failed";
@@ -1041,18 +1046,21 @@ function normalizeBatchEntries(listed, limit) {
 
 // 列表页给的地址可能是缩略图。按候选顺序试，去掉缩放参数的地址失败时
 // 再退回原始地址，避免整张图直接判失败。
-async function saveWithCandidates(tabId, entry) {
+async function saveWithCandidates(tabId, entry, options = {}) {
+  // 批量模式靠外层汇总，默认静默；单张右键需要进度和结果提示
+  const quiet = options.quiet !== false;
   const candidates = (
     Array.isArray(entry.candidates) && entry.candidates.length
       ? entry.candidates
       : [entry.url]
-  ).slice(0, 3);
+  ).slice(0, 4);
 
   for (let i = 0; i < candidates.length; i++) {
     const isLast = i === candidates.length - 1;
     const outcome = await saveOne(tabId, candidates[i], "image", {
-      quiet: true,
-      // 中间候选失败不写历史，只保留最后一条真实结果
+      quiet,
+      // 中间候选失败不写历史也不弹错误，只把最后一个候选的原因露出来
+      quietFailure: !isLast,
       suppressFailureHistory: !isLast,
     });
     if (outcome !== "failed") return outcome;

@@ -59,6 +59,8 @@ A Chrome extension that lets you right-click any image on the web and save it di
 
 Xiaohongshu and Instagram stack links, buttons and gradient overlays on top of every photo. Chrome then treats the click target as a plain page element, so the normal image menu item never appears. On these sites the extension registers a second entry, **Save image under cursor to Google Photos**, for any right-click. It records the cursor position, walks down through the overlaying elements, and picks the first `<img>`, `<video>` or CSS background image it finds. The site list lives in the `sgp_cover_sites` storage key and defaults to `*://*.xiaohongshu.com/*` and `*://*.instagram.com/*`; add patterns there to cover more sites.
 
+On Xiaohongshu the rendered URL is usually a preview. The `sns-webpic-*` host serves a downscaled file, and the trailing `!nd_dft_wlteh_webp_3` style caps it again. The extension rewrites both parts to the `sns-img-*` host with the style stripped, and keeps the original preview URL as a fallback. Images on list and search pages top out around 640px wide because the page never receives a larger file, so open the note detail page to get the full-size version.
+
 ### Saving a video
 
 Right-click a video and choose **Save to Google Photos**. Videos longer than 10 seconds are uploaded as the original file. Shorter clips are packaged as a Live Photo when the page exposes a matching still image, since Apple's own Live Photos are fixed at 3 seconds and third-party converters cap around 5. When the duration cannot be read, the cover-image rule decides.
