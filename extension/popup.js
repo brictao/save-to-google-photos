@@ -228,5 +228,9 @@ function sendMessage(msg) {
 // --------------------------------------------------
 // Init
 // --------------------------------------------------
+// 每次打开 popup 都让 background 重建一次右键菜单。菜单只在安装和浏览器
+// 启动时注册，漏注册时用户可以靠打开 popup 自愈，不必重装扩展。
+sendMessage({ action: "ensureMenus" }).catch(() => {});
+
 checkAuthStatus();
 loadHistory();

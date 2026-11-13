@@ -642,6 +642,85 @@
         return null;
     }
 
+    // 小红书、Instagram 会在图片上叠链接、按钮和渐变遮罩。右键落在覆盖层
+    // 上时 Chrome 判定为普通页面，image 菜单不会出现。这里记录右键坐标，
+    // 菜单点击后按坐标找出最上层的媒体元素。
+    let lastContextPoint = null;
+
+    document.addEventListener(
+        "contextmenu",
+        (event) => {
+            if (!event.isTrusted) return;
+            lastContextPoint = {
+                x: event.clientX,
+                y: event.clientY,
+                time: Date.now(),
+            };
+        },
+        true
+    );
+
+    // 背景图样式的地址提取。渐变背景匹配不到 url()，会被跳过。
+    function backgroundImageUrl(el) {
+        const bg = getComputedStyle(el).backgroundImage;
+        if (!bg || bg === "none") return null;
+        const matched = /url\(["']?([^"')]+)["']?\)/.exec(bg);
+        if (!matched) return null;
+        const url = absoluteUrl(matched[1]);
+        return /^https?:/i.test(url || "") ? url : null;
+    }
+
+    function mediaAtPoint(x, y) {
+        let stack = [];
+        if (typeof document.elementsFromPoint === "function") {
+            stack = document.elementsFromPoint(x, y) || [];
+        } else if (document.elementFromPoint) {
+            const top = document.elementFromPoint(x, y);
+            if (top) stack = [top];
+        }
+
+        for (const el of stack) {
+            if (el.tagName === "IMG") {
+                const candidates = imageCandidates(el);
+                if (candidates.length) {
+                    return { ok: true, kind: "image", url: candidates[0], candidates };
+                }
+                continue;
+            }
+
+            if (el.tagName === "VIDEO") {
+                const url = absoluteUrl(el.currentSrc || el.getAttribute("src"));
+                if (url) {
+                    return { ok: true, kind: "video", url, candidates: [url] };
+                }
+                continue;
+            }
+
+            const bg = backgroundImageUrl(el);
+            if (bg) {
+                const candidates = [stripThumbnailParams(bg), bg].filter(Boolean);
+                return {
+                    ok: true,
+                    kind: "image",
+                    url: candidates[0],
+                    candidates,
+                };
+            }
+        }
+
+        return { ok: false };
+    }
+
+    function resolveAtCursor() {
+        if (!lastContextPoint) {
+            return { ok: false, reason: "No right-click was recorded on this page." };
+        }
+        if (Date.now() - lastContextPoint.time > 120000) {
+            return { ok: false, reason: "The right-click was too long ago, try again." };
+        }
+        return mediaAtPoint(lastContextPoint.x, lastContextPoint.y);
+    }
+
     // 按可信度排列候选地址：去参数的在前，原始地址留作回退
     function imageCandidates(img) {
         const raw = [
@@ -741,6 +820,17 @@
             fetchAsBase64(request.url)
                 .then((result) => sendResponse(result))
                 .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+            return true;
+        }
+
+        if (request.action === "resolveAtCursor") {
+            let result;
+            try {
+                result = resolveAtCursor();
+            } catch (err) {
+                result = { ok: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
             return true;
         }
 

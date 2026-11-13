@@ -9,6 +9,14 @@ const GOOGLE_PHOTOS_UPLOAD_URL =
 const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
 const CONTEXT_MENU_ID = "save-to-google-photos";
+// 覆盖层兜底入口。小红书、Instagram 会在图片上叠链接和渐变遮罩，右键
+// 落点被判定为普通页面时 image 菜单不会出现，这类站点用坐标反查补一个入口。
+const CONTEXT_MENU_FALLBACK_ID = "save-to-google-photos-at-cursor";
+const COVER_SITE_PATTERNS_KEY = "sgp_cover_sites";
+const DEFAULT_COVER_SITE_PATTERNS = [
+  "*://*.xiaohongshu.com/*",
+  "*://*.instagram.com/*",
+];
 
 // Google Photos 单文件上限按官方口径 200 MB，超限只会由 API 侧失败，
 // 提前在本地拦下来可以给出可操作的提示。
@@ -43,19 +51,56 @@ const MIME_BY_EXT = {
 // --------------------------------------------------
 // 1. Context Menu
 // --------------------------------------------------
-chrome.runtime.onInstalled.addListener(() => {
+function buildContextMenus(patterns) {
   chrome.contextMenus.removeAll(() => {
-    // 只保留一个顶层菜单项。多个顶层项会被 Chrome 折叠成二级菜单，
-    // 这里用单一入口，标题按右键目标切换，点击后自动判断走哪条路。
-    chrome.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: "Save to Google Photos",
-      contexts: ["image", "video"],
-    });
+    void chrome.runtime.lastError;
+
+    // 图片和视频上右键走精确入口，标题会按右键目标动态变化
+    chrome.contextMenus.create(
+      {
+        id: CONTEXT_MENU_ID,
+        title: "Save to Google Photos",
+        contexts: ["image", "video"],
+      },
+      () => void chrome.runtime.lastError
+    );
+
+    if (!Array.isArray(patterns) || !patterns.length) return;
+
+    // 只在配置的站点出现，并排除 image / video，避免同一张图上出现两个入口
+    chrome.contextMenus.create(
+      {
+        id: CONTEXT_MENU_FALLBACK_ID,
+        title: "Save image under cursor to Google Photos",
+        contexts: ["page", "link", "selection", "frame"],
+        documentUrlPatterns: patterns,
+      },
+      () => void chrome.runtime.lastError
+    );
   });
+}
+
+async function registerContextMenus() {
+  const stored = await storageGet(COVER_SITE_PATTERNS_KEY);
+  const patterns =
+    Array.isArray(stored) && stored.length ? stored : DEFAULT_COVER_SITE_PATTERNS;
+  buildContextMenus(patterns);
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  void registerContextMenus();
+});
+
+// 浏览器重启后菜单可能丢失，启动时补注册一次
+chrome.runtime.onStartup.addListener(() => {
+  void registerContextMenus();
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === CONTEXT_MENU_FALLBACK_ID) {
+    await handleSaveAtCursor(tab);
+    return;
+  }
   if (info.menuItemId !== CONTEXT_MENU_ID) return;
   await handleSave(tab, info.srcUrl, info.mediaType);
 });
@@ -98,6 +143,45 @@ async function handleSave(tab, srcUrl, mediaType) {
 // 时长未知时不擅自改判，保持原来的封面对齐逻辑
 function isLongVideo(seconds) {
   return Number.isFinite(seconds) && seconds > MAX_LIVE_PHOTO_SECONDS;
+}
+
+// 覆盖层站点：按右键坐标反查媒体元素，再走普通保存流程
+async function handleSaveAtCursor(tab) {
+  const tabId = tab?.id;
+  const target = await requestAtCursor(tabId);
+
+  if (!target || !target.ok) {
+    showToast(
+      tabId,
+      "error",
+      "No image found",
+      target?.reason || "Nothing saveable was under the cursor."
+    );
+    return;
+  }
+
+  if (target.kind === "video") {
+    await handleSingleMedia(tabId, target.url, "video");
+    return;
+  }
+
+  await saveWithCandidates(tabId, {
+    url: target.url,
+    candidates: target.candidates || [target.url],
+  });
+}
+
+function requestAtCursor(tabId) {
+  const message = { action: "resolveAtCursor" };
+
+  return chrome.tabs
+    .sendMessage(tabId, message)
+    .catch(() =>
+      chrome.scripting
+        .executeScript({ target: { tabId }, files: ["content.js"] })
+        .then(() => chrome.tabs.sendMessage(tabId, message))
+    )
+    .catch(() => null);
 }
 
 // --------------------------------------------------
@@ -1149,6 +1233,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         sendResponse({ success: true });
       }
     });
+    return true;
+  }
+
+  if (request.action === "ensureMenus") {
+    registerContextMenus()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 

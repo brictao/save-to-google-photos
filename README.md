@@ -55,6 +55,10 @@ A Chrome extension that lets you right-click any image on the web and save it di
 3. Select **Save to Google Photos**
 4. A notification will confirm the upload
 
+### Pages that cover their images
+
+Xiaohongshu and Instagram stack links, buttons and gradient overlays on top of every photo. Chrome then treats the click target as a plain page element, so the normal image menu item never appears. On these sites the extension registers a second entry, **Save image under cursor to Google Photos**, for any right-click. It records the cursor position, walks down through the overlaying elements, and picks the first `<img>`, `<video>` or CSS background image it finds. The site list lives in the `sgp_cover_sites` storage key and defaults to `*://*.xiaohongshu.com/*` and `*://*.instagram.com/*`; add patterns there to cover more sites.
+
 ### Saving a video
 
 Right-click a video and choose **Save to Google Photos**. Videos longer than 10 seconds are uploaded as the original file. Shorter clips are packaged as a Live Photo when the page exposes a matching still image, since Apple's own Live Photos are fixed at 3 seconds and third-party converters cap around 5. When the duration cannot be read, the cover-image rule decides.

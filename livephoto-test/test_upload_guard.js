@@ -28,7 +28,12 @@ const context = {
   importScripts: noop,
   self: { MotionPhoto: {} },
   chrome: {
-    runtime: { lastError: undefined, onInstalled: addListener, onMessage: addListener },
+    runtime: {
+      lastError: undefined,
+      onInstalled: addListener,
+      onStartup: addListener,
+      onMessage: addListener,
+    },
     contextMenus: { create: noop, removeAll: (cb) => cb && cb(), update: noop, onClicked: addListener },
     tabs: { onActivated: addListener, sendMessage: () => Promise.reject(new Error("no receiver")) },
     scripting: { executeScript: () => Promise.resolve() },

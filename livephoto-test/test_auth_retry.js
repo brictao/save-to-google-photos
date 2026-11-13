@@ -35,6 +35,7 @@ const context = {
     runtime: {
       lastError: undefined,
       onInstalled: addListener,
+      onStartup: addListener,
       onMessage: addListener,
     },
     contextMenus: {
