@@ -36,14 +36,16 @@ The extension requests the following permissions:
 |---|---|
 | `contextMenus` | Add "Save to Google Photos" to the right-click menu |
 | `identity` | Authenticate with your Google account |
-| `notifications` | Show upload status notifications |
-| `activeTab` | Access the current tab to download image data |
-| `host_permissions` | Communicate with Google Photos API and fetch images |
+| `scripting` | Inject the in-page media picker into the current tab when you open it from the popup |
+| `storage` | Keep a local list of recent save results and fingerprints of media already uploaded, so the same file is not uploaded twice |
+| `notifications` | Report a failed upload after you switch away from the tab |
+| `host_permissions` | Communicate with the Google Photos API and download the media you choose |
 
 ## Data Security
 
 - All communication with Google APIs is conducted over HTTPS.
 - Authentication tokens are managed by Chrome's built-in Identity API and are not accessible to third parties.
+- Recent save results and duplicate-detection fingerprints are stored only in the browser's local extension storage. They are never synced, never sent to the developer, and can be cleared from the popup.
 - No data is stored on external servers controlled by the developer.
 
 ## Changes to This Policy
