@@ -112,5 +112,29 @@ check(
 );
 check("直播流的 Infinity 不改判", context.isLongVideo(Infinity) === false);
 
+// 6) 批量条目归一化
+const withItems = context.normalizeBatchEntries(
+  { items: [{ url: "https://a.sgp/1.jpg", candidates: ["https://a.sgp/1.jpg", "https://a.sgp/1-full.jpg"] }] },
+  20
+);
+check(
+  "优先采用 items 候选列表",
+  withItems.length === 1 && withItems[0].candidates.length === 2,
+  JSON.stringify(withItems)
+);
+
+const legacy = context.normalizeBatchEntries(
+  { images: ["https://a.sgp/1.jpg", "https://a.sgp/2.jpg"] },
+  20
+);
+check(
+  "兼容旧版 images 数组",
+  legacy.length === 2 && legacy[0].candidates[0] === "https://a.sgp/1.jpg",
+  JSON.stringify(legacy)
+);
+
+check("limit 对条目生效", context.normalizeBatchEntries({ images: ["1", "2", "3"] }, 2).length === 2);
+check("空输入返回空数组", context.normalizeBatchEntries(null, 20).length === 0);
+
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

@@ -61,7 +61,7 @@ Right-click a video and choose **Save to Google Photos**. Videos longer than 10 
 
 ### Saving every image on a page
 
-Open the popup and click **Save all images on this page**. Images smaller than 300×300 are skipped, repeated URLs are ignored, and up to 20 images are uploaded one at a time. The popup lists the result of each run, and the extension remembers what it already saved so a repeated right-click does not create a duplicate.
+Open the popup and click **Save all images on this page**. For each image the extension prefers the largest `srcset` candidate, falls back to `data-*` lazy-load URLs, and strips CDN resize parameters (Qiniu `imageView2` / `imageMogr2`) while keeping the format segment, so the full-size file is uploaded instead of the grid thumbnail. Each entry keeps its original URL as a fallback when the cleaned one fails. Images smaller than 300×300 are skipped, repeated URLs are ignored, and up to 20 images are uploaded one at a time. The popup lists the result of each run, and the extension remembers what it already saved so a repeated right-click does not create a duplicate.
 
 ### Saving a Live Photo
 

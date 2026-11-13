@@ -574,26 +574,126 @@
     // --------------------------------------------------
     // 批量保存：收集当前页面上足够大的图片，去重后交给后台
     // --------------------------------------------------
+    // 七牛这类 CDN 把缩放参数直接拼在 query 里，例如
+    // imageView2/2/w/400/q/90/format/jpeg。去掉缩放段就能拿到原图，
+    // format 段要留下，它决定返回的编码格式。
+    function stripThumbnailParams(url) {
+        try {
+            const parsed = new URL(url);
+            const query = parsed.search.slice(1);
+            if (!query) return url;
+
+            if (/^imageslim/i.test(query)) {
+                return `${parsed.origin}${parsed.pathname}`;
+            }
+            if (!/^(imageView2|imageMogr2|imageView|thumbnail)\//i.test(query)) {
+                return url;
+            }
+
+            // format 段的位置不固定，直接匹配而不是按位置步进。
+            // 缩放段全部丢掉，只留下编码格式。
+            const format = query.match(/\/format\/([a-zA-Z0-9]+)/i);
+            const search = format ? `?format=${format[1]}` : "";
+            return `${parsed.origin}${parsed.pathname}${search}`;
+        } catch {
+            return url;
+        }
+    }
+
+    // srcset 里描述符最大的那一项通常就是原图
+    function largestSrcsetUrl(img) {
+        const srcset = img.getAttribute?.("srcset");
+        if (!srcset) return null;
+
+        let best = null;
+        let bestScore = -1;
+
+        for (const part of srcset.split(",")) {
+            const tokens = part.trim().split(/\s+/);
+            const raw = tokens[0];
+            if (!raw) continue;
+
+            const descriptor = tokens[1] || "";
+            let score = 1;
+            if (/^\d+(\.\d+)?w$/.test(descriptor)) {
+                score = parseFloat(descriptor);
+            } else if (/^\d+(\.\d+)?x$/.test(descriptor)) {
+                score = parseFloat(descriptor) * 1000;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = raw;
+            }
+        }
+
+        return best ? absoluteUrl(best) : null;
+    }
+
+    // 懒加载站点把原图地址放在 data-* 里，src 上只有占位图
+    function dataOriginalUrl(img) {
+        const dataset = img.dataset || {};
+        for (const key of ["original", "full", "raw", "src", "lazySrc", "lazy", "originalSrc", "url"]) {
+            const value = dataset[key];
+            if (!value || /^data:/i.test(value)) continue;
+            const url = absoluteUrl(value);
+            if (url) return url;
+        }
+        return null;
+    }
+
+    // 按可信度排列候选地址：去参数的在前，原始地址留作回退
+    function imageCandidates(img) {
+        const raw = [
+            largestSrcsetUrl(img),
+            dataOriginalUrl(img),
+            absoluteUrl(img.getAttribute?.("src")),
+            absoluteUrl(img.currentSrc),
+        ].filter(Boolean);
+
+        const out = [];
+        const seen = new Set();
+
+        for (const url of raw) {
+            for (const candidate of [stripThumbnailParams(url), url]) {
+                if (!/^https?:/i.test(candidate) || seen.has(candidate)) continue;
+                seen.add(candidate);
+                out.push(candidate);
+            }
+        }
+
+        return out.slice(0, 3);
+    }
+
     function collectImages(limit = 20) {
         const seen = new Set();
         const items = [];
 
         for (const img of Array.from(document.images)) {
-            const url = absoluteUrl(img.currentSrc || img.src);
-            if (!url || !/^https?:/i.test(url)) continue;
+            const candidates = imageCandidates(img);
+            const primary = candidates[0];
+            if (!primary) continue;
 
-            const width = img.naturalWidth || img.width || 0;
-            const height = img.naturalHeight || img.height || 0;
+            // 列表页常把图压到卡片大小，自然尺寸和显示尺寸取较大的那个
+            const rect = img.getBoundingClientRect?.();
+            const width = Math.max(img.naturalWidth || 0, img.width || 0, Math.round(rect?.width || 0));
+            const height = Math.max(img.naturalHeight || 0, img.height || 0, Math.round(rect?.height || 0));
+
             // 图标、头像、跟踪像素一律跳过
             if (width < 300 || height < 300) continue;
-            if (seen.has(url)) continue;
+            if (seen.has(primary)) continue;
 
-            seen.add(url);
-            items.push({ url, area: width * height });
+            seen.add(primary);
+            items.push({ url: primary, candidates, area: width * height });
         }
 
         items.sort((a, b) => b.area - a.area);
-        return { images: items.slice(0, limit).map((item) => item.url) };
+        const picked = items.slice(0, limit);
+
+        return {
+            images: picked.map((item) => item.url),
+            items: picked,
+        };
     }
 
     // --------------------------------------------------

@@ -184,13 +184,15 @@ async function saveOne(tabId, url, kind, options = {}) {
   } catch (err) {
     console.error("[Save to Google Photos]", kind, err);
     const message = err.message || String(err);
-    await addHistory({
-      status: "failed",
-      kind,
-      name: "",
-      url: shortUrl(url),
-      message,
-    });
+    if (!options.suppressFailureHistory) {
+      await addHistory({
+        status: "failed",
+        kind,
+        name: "",
+        url: shortUrl(url),
+        message,
+      });
+    }
     if (!quiet) {
       showToast(tabId, "error", "Save Failed", message);
     }
@@ -886,22 +888,22 @@ async function saveAllImages(tabId, limit = 20) {
     }
   }
 
-  const urls = Array.isArray(listed?.images) ? listed.images.slice(0, limit) : [];
-  if (!urls.length) {
+  const entries = normalizeBatchEntries(listed, limit);
+  if (!entries.length) {
     showToast(tabId, "error", "Nothing to save", "No large images were found on this page.");
     return { total: 0, saved: 0, skipped: 0, failed: 0 };
   }
 
-  const counts = { total: urls.length, saved: 0, skipped: 0, failed: 0 };
+  const counts = { total: entries.length, saved: 0, skipped: 0, failed: 0 };
 
-  for (let i = 0; i < urls.length; i++) {
+  for (let i = 0; i < entries.length; i++) {
     showToast(
       tabId,
       "loading",
-      `Saving ${i + 1} of ${urls.length}…`,
+      `Saving ${i + 1} of ${entries.length}…`,
       "Uploading the images found on this page."
     );
-    const outcome = await saveOne(tabId, urls[i], "image", { quiet: true });
+    const outcome = await saveWithCandidates(tabId, entries[i]);
     counts[outcome] = (counts[outcome] || 0) + 1;
     // 轻微间隔，避免并发限流
     await delay(250);
@@ -931,6 +933,48 @@ async function saveAllImages(tabId, limit = 20) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 新版本 content 会带上候选地址列表，旧版本只有 URL 数组
+function normalizeBatchEntries(listed, limit) {
+  const max = Number.isFinite(limit) && limit > 0 ? limit : 20;
+
+  if (Array.isArray(listed?.items) && listed.items.length) {
+    return listed.items
+      .filter((item) => item && typeof item.url === "string")
+      .slice(0, max);
+  }
+
+  if (Array.isArray(listed?.images)) {
+    return listed.images
+      .filter((url) => typeof url === "string")
+      .slice(0, max)
+      .map((url) => ({ url, candidates: [url] }));
+  }
+
+  return [];
+}
+
+// 列表页给的地址可能是缩略图。按候选顺序试，去掉缩放参数的地址失败时
+// 再退回原始地址，避免整张图直接判失败。
+async function saveWithCandidates(tabId, entry) {
+  const candidates = (
+    Array.isArray(entry.candidates) && entry.candidates.length
+      ? entry.candidates
+      : [entry.url]
+  ).slice(0, 3);
+
+  for (let i = 0; i < candidates.length; i++) {
+    const isLast = i === candidates.length - 1;
+    const outcome = await saveOne(tabId, candidates[i], "image", {
+      quiet: true,
+      // 中间候选失败不写历史，只保留最后一条真实结果
+      suppressFailureHistory: !isLast,
+    });
+    if (outcome !== "failed") return outcome;
+  }
+
+  return "failed";
 }
 
 // --------------------------------------------------
