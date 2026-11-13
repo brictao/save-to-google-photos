@@ -778,6 +778,145 @@
         return out.slice(0, 4);
     }
 
+    // 把单个地址展开成「原图优先、原始地址兜底」的候选列表
+    function urlCandidates(url) {
+        const out = [];
+        const seen = new Set();
+        const push = (candidate) => {
+            if (!candidate || !/^https?:/i.test(candidate) || seen.has(candidate)) return;
+            seen.add(candidate);
+            out.push(candidate);
+        };
+
+        for (const candidate of xhsOriginalUrls(url)) push(candidate);
+        for (const candidate of [stripThumbnailParams(url), url]) push(candidate);
+
+        return out.slice(0, 4);
+    }
+
+    // 小红书笔记数据里的图片项有 urlDefault / urlPre / infoList 几种写法
+    function pickImageUrl(item) {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return null;
+
+        const info = Array.isArray(item.infoList) ? item.infoList : [];
+        const urls = [
+            item.urlDefault,
+            item.url_default,
+            item.urlPre,
+            item.url_pre,
+            item.url,
+            info[0]?.url,
+            info[1]?.url,
+        ];
+
+        for (const url of urls) {
+            if (typeof url === "string" && /^https?:/i.test(url)) return url;
+        }
+        return null;
+    }
+
+    function imageListFrom(container) {
+        if (!container || typeof container !== "object") return null;
+
+        const candidates = [
+            container.imageList,
+            container.image_list,
+            container.images,
+            container.noteCard?.imageList,
+            container.noteCard?.image_list,
+            container.note?.noteCard?.imageList,
+        ];
+
+        for (const list of candidates) {
+            if (!Array.isArray(list) || !list.length) continue;
+            const urls = list.map(pickImageUrl).filter(Boolean);
+            if (urls.length) return urls;
+        }
+        return null;
+    }
+
+    // 从 React fiber 向上查找当前笔记的完整图片列表
+    function readReactNoteImages(el) {
+        if (!el) return null;
+
+        const fiberKey = Object.keys(el).find(
+            (key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
+        );
+        if (!fiberKey) return null;
+
+        let fiber = el[fiberKey];
+        let depth = 0;
+        while (fiber && depth < 60) {
+            const props = fiber.memoizedProps;
+            if (props && typeof props === "object") {
+                const containers = [
+                    props.note,
+                    props.data,
+                    props.noteCard,
+                    props.item,
+                    props.noteData,
+                    props.initialData,
+                    props.note?.noteCard,
+                    props.data?.noteCard,
+                    props.data?.note?.noteCard,
+                    props,
+                ];
+                for (const container of containers) {
+                    const urls = imageListFrom(container);
+                    if (urls) return urls;
+                }
+            }
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
+    function displayArea(el) {
+        const rect = el.getBoundingClientRect?.();
+        const width = Math.max(el.naturalWidth || 0, el.width || 0, Math.round(rect?.width || 0));
+        const height = Math.max(el.naturalHeight || 0, el.height || 0, Math.round(rect?.height || 0));
+        return width * height;
+    }
+
+    // 当前打开的多图帖子：优先弹窗内的图片，取面积最大的那张所在的笔记
+    function collectNoteImages() {
+        const images = Array.from(document.images || []);
+        if (!images.length) return { ok: false, reason: "No images were found on this page." };
+
+        const scoped = [];
+        for (const selector of ['[role="dialog"]', ".note-detail-mask", ".note-detail", ".note-container"]) {
+            for (const node of Array.from(document.querySelectorAll(selector) || [])) {
+                scoped.push(...Array.from(node.querySelectorAll?.("img") || []));
+            }
+        }
+
+        const pool = scoped.length ? scoped : images;
+        const sorted = pool
+            .map((img) => ({ img, area: displayArea(img) }))
+            .sort((a, b) => b.area - a.area);
+
+        for (const entry of sorted) {
+            const urls = readReactNoteImages(entry.img);
+            if (!urls || !urls.length) continue;
+
+            const items = [];
+            const seen = new Set();
+            for (const raw of urls) {
+                const candidates = urlCandidates(raw);
+                if (!candidates.length) continue;
+                if (seen.has(candidates[0])) continue;
+                seen.add(candidates[0]);
+                items.push({ url: candidates[0], candidates });
+            }
+
+            if (items.length) return { ok: true, count: items.length, items };
+        }
+
+        return { ok: false, reason: "No post image list was found. Open a post first." };
+    }
+
     function collectImages(limit = 20) {
         const seen = new Set();
         const items = [];
@@ -861,6 +1000,17 @@
             let result;
             try {
                 result = resolveAtCursor();
+            } catch (err) {
+                result = { ok: false, reason: err.message || String(err) };
+            }
+            sendResponse(result);
+            return true;
+        }
+
+        if (request.action === "collectNoteImages") {
+            let result;
+            try {
+                result = collectNoteImages();
             } catch (err) {
                 result = { ok: false, reason: err.message || String(err) };
             }

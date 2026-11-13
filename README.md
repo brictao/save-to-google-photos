@@ -69,6 +69,10 @@ Right-click a video and choose **Save to Google Photos**. Videos longer than 10 
 
 Open the popup and click **Save all images on this page**. For each image the extension prefers the largest `srcset` candidate, falls back to `data-*` lazy-load URLs, and strips CDN resize parameters (Qiniu `imageView2` / `imageMogr2`) while keeping the format segment, so the full-size file is uploaded instead of the grid thumbnail. Each entry keeps its original URL as a fallback when the cleaned one fails. Images smaller than 300×300 are skipped, repeated URLs are ignored, and up to 20 images are uploaded one at a time. The popup lists the result of each run, and the extension remembers what it already saved so a repeated right-click does not create a duplicate.
 
+### Saving every image in a post
+
+Xiaohongshu opens a post inside an in-page modal, and the feed only renders the cover image. Open the post, then click **Save all images in this post** in the popup. The extension reads the post's complete image list from the React component data on the open modal, converts every entry to the original `sns-img` URL, and uploads up to 40 images one at a time. The button only appears on Xiaohongshu; other sites keep the page-level button. Right-click still saves exactly the one image you clicked.
+
 ### Saving a Live Photo
 
 Right-click the still image and choose **Save Live Photo to Google Photos**. The extension looks for the paired video in two ways:
