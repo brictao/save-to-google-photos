@@ -98,5 +98,19 @@ check("octet-stream 按扩展名补类型", octet === "image/png", octet);
 const videoMime = context.normalizeMime("", "https://cdn.example.com/clip.mp4", "video");
 check("空 Content-Type 推断视频类型", videoMime === "video/mp4", videoMime);
 
+// 5) 视频时长判定
+// Apple 原生 Live Photo 3 秒，第三方工具上限一般 5 秒，阈值取 10 秒
+check("3 秒视频仍按 Live Photo 处理", context.isLongVideo(3) === false);
+check("5 秒视频仍按 Live Photo 处理", context.isLongVideo(5) === false);
+check("10 秒视频仍按 Live Photo 处理", context.isLongVideo(10) === false);
+check("11 秒视频按视频原文件处理", context.isLongVideo(11) === true);
+check("60 秒视频按视频原文件处理", context.isLongVideo(60) === true);
+check(
+  "时长未知时不改判",
+  context.isLongVideo(undefined) === false && context.isLongVideo(NaN) === false,
+  "undefined / NaN 都返回 false"
+);
+check("直播流的 Infinity 不改判", context.isLongVideo(Infinity) === false);
+
 console.log(failures === 0 ? "\n全部通过" : `\n${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

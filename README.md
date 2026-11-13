@@ -57,7 +57,7 @@ A Chrome extension that lets you right-click any image on the web and save it di
 
 ### Saving a video
 
-Right-click a video and choose **Save to Google Photos**. When the page exposes a matching still image, the video is packaged as a Live Photo; otherwise the video file itself is uploaded.
+Right-click a video and choose **Save to Google Photos**. Videos longer than 10 seconds are uploaded as the original file. Shorter clips are packaged as a Live Photo when the page exposes a matching still image, since Apple's own Live Photos are fixed at 3 seconds and third-party converters cap around 5. When the duration cannot be read, the cover-image rule decides.
 
 ### Saving every image on a page
 

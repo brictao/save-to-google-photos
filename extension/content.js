@@ -516,6 +516,9 @@
             found: true,
             imageUrl,
             videoUrl,
+            // 交给后台按实际时长区分 Live Photo 和普通视频。
+            // 直播流的 duration 是 Infinity，这里一并过滤掉。
+            videoDuration: Number.isFinite(video?.duration) ? video.duration : undefined,
             via: react ? "页面组件数据" : "页面元素",
         };
     }

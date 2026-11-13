@@ -67,6 +67,10 @@ chrome.tabs.onActivated.addListener(() => {
   });
 });
 
+// Apple 原生 Live Photo 固定 3 秒，第三方转换工具一般不超过 5 秒。
+// 超过这个上限的视频按原文件保存，避免把整段视频拼成 Motion Photo。
+const MAX_LIVE_PHOTO_SECONDS = 10;
+
 async function handleSave(tab, srcUrl, mediaType) {
   const tabId = tab?.id;
   if (!srcUrl && mediaType !== "video") {
@@ -76,12 +80,24 @@ async function handleSave(tab, srcUrl, mediaType) {
 
   // 先确认页面上有没有 Live Photo 配对，再决定走合成还是普通上传
   const ctx = await requestContextPair(tabId);
+
+  // 右键的是视频，时长明显超出 Live Photo 的范围：按视频原文件保存
+  if (mediaType === "video" && ctx?.found && isLongVideo(ctx.videoDuration)) {
+    await handleSingleMedia(tabId, srcUrl || ctx.videoUrl, "video");
+    return;
+  }
+
   if (ctx && ctx.found && ctx.videoUrl) {
     await handleLivePhoto(tab, srcUrl, mediaType, ctx);
     return;
   }
 
   await handleSingleMedia(tabId, srcUrl, mediaType === "video" ? "video" : "image");
+}
+
+// 时长未知时不擅自改判，保持原来的封面对齐逻辑
+function isLongVideo(seconds) {
+  return Number.isFinite(seconds) && seconds > MAX_LIVE_PHOTO_SECONDS;
 }
 
 // --------------------------------------------------
@@ -606,8 +622,9 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx) {
 
     const fileName = buildMotionPhotoName(pair.imageUrl);
 
-    // 3) 上传
+    // 3) 上传。合成结果同样受 Google 的单文件上限约束，在本地先拦一道
     const size = result.bytes.byteLength;
+    assertUploadable({ size, mimeType: "image/jpeg" }, "image");
     showToast(
       tabId,
       "loading",
