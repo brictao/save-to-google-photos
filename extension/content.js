@@ -928,8 +928,8 @@
 .sgp-title { font-size: 15px; font-weight: 600; color: #111; }
 .sgp-count { font-size: 12px; color: #666; }
 .sgp-scroll { overflow-y: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; padding: 16px 18px; }
-.sgp-grid { column-width: 260px; column-gap: 14px; }
-.sgp-card { display: inline-block; vertical-align: top; box-sizing: border-box; width: 100%; margin: 0 0 12px; break-inside: avoid; border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.sgp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; align-items: start; }
+.sgp-card { display: block; box-sizing: border-box; width: auto; margin: 0; border: 1px solid #e3e3e3; border-radius: 10px; overflow: hidden; background: #fafafa; cursor: pointer; transition: border-color .12s, box-shadow .12s; }
 .sgp-card.selected { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
 .sgp-thumb { width: 100%; height: auto; display: block; object-fit: contain; background: #e8e8e8; }
 .sgp-thumb.missing { min-height: 48px; }

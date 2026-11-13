@@ -40,6 +40,8 @@ MEASURE = """() => {
         })),
         head:rect(root.querySelector('.sgp-head')), foot:rect(root.querySelector('.sgp-foot')),
         panel:rect(root.querySelector('.sgp-panel')),
+        grid:rect(root.querySelector('.sgp-grid')),
+        columns:getComputedStyle(root.querySelector('.sgp-grid')).gridTemplateColumns.split(' ').length,
         count:root.querySelector('.sgp-count').textContent
     };
 }"""
@@ -62,6 +64,15 @@ def verify_layout(page, count):
     assert data['panel']['left'] >= 0 and data['panel']['right'] <= viewport['width'] + 1
     assert data['head']['top'] >= 0 and data['foot']['bottom'] <= viewport['height'] + 1
     assert data['foot']['height'] >= 40, '底栏被压缩'
+
+    # 按行填充：同一行的卡片顶部对齐、从左到右排列，行满后才换行。
+    # 图片少于列数时 auto-fit 折叠空列，末列必须贴住网格右边界。
+    columns = data['columns']
+    first_top = cards[0]['top']
+    first_row = [card for card in cards if abs(card['top'] - first_top) <= 1]
+    assert len(first_row) == min(count, columns), f'应按行填充：第一行 {len(first_row)} 张，期望 {min(count, columns)}'
+    assert [card['left'] for card in first_row] == sorted(card['left'] for card in first_row), '行内顺序应从左到右'
+    assert abs(first_row[-1]['right'] - data['grid']['right']) <= 3, '末列未铺满网格'
     return data
 
 
