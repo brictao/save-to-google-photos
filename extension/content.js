@@ -3,12 +3,21 @@
 // ============================================================
 
 (() => {
-    // 扩展重载后，页面上旧版本的 content script 会与扩展断开连接，
-    // 但它的 window 标记仍然存在。不能因为标记存在就退出，否则新实例
-    // 永远无法接管页面，消息也没有任何监听器回应。
+    // 扩展重载或再次注入时，先注销上一实例遗留的 DOM 与监听器，
+    // 避免同一页面上挂载多套事件监听或残留旧的选择面板。
+    try {
+        window.__sgpCleanup?.();
+    } catch {
+        // 忽略旧实例清理异常
+    }
     document.querySelectorAll(".sgp-toast-container").forEach((el) => el.remove());
     document.querySelectorAll("style[data-sgp-style]").forEach((el) => el.remove());
+    document.getElementById?.("sgp-picker-host")?.remove?.();
     window.__saveToGooglePhotosToast = true;
+
+    const MAX_LIVE_PHOTO_SECONDS = 10;
+    const MENU_MODE_CACHE_TTL_MS = 1500;
+    const menuModeCache = typeof WeakMap === "function" ? new WeakMap() : null;
 
     // --------------------------------------------------
     // Inject styles
@@ -141,9 +150,11 @@
     // Toast creation
     // --------------------------------------------------
     function createToast(type, title, message, autoDismiss = true) {
+        const safeType = type === "loading" || type === "success" ? type : "error";
+
         // 多步流程和下载进度会连续推送 loading。同一条卡片原地更新文本，
         // 比销毁重建稳定，也不会在页面上堆出多条。
-        if (type === "loading" && currentLoadingToast) {
+        if (safeType === "loading" && currentLoadingToast) {
             updateToast(currentLoadingToast, title, message);
             return currentLoadingToast;
         }
@@ -155,31 +166,45 @@
         }
 
         const toast = document.createElement("div");
-        toast.className = `sgp-toast sgp-toast--${type}`;
+        toast.className = `sgp-toast sgp-toast--${safeType}`;
 
-        // Icon
-        let iconHTML = "";
-        if (type === "loading") {
-            iconHTML = `<div class="sgp-spinner"></div>`;
-        } else if (type === "success") {
-            iconHTML = `<span class="sgp-toast-icon">✅</span>`;
+        let iconEl;
+        if (safeType === "loading") {
+            iconEl = document.createElement("div");
+            iconEl.className = "sgp-spinner";
         } else {
-            iconHTML = `<span class="sgp-toast-icon">❌</span>`;
+            iconEl = document.createElement("span");
+            iconEl.className = "sgp-toast-icon";
+            iconEl.textContent = safeType === "success" ? "✅" : "❌";
         }
 
-        toast.innerHTML = `
-      ${iconHTML}
-      <div class="sgp-toast-body">
-        <div class="sgp-toast-title">${escapeHtml(title)}</div>
-        <div class="sgp-toast-message">${escapeHtml(message)}</div>
-      </div>
-      <button class="sgp-toast-close">✕</button>
-    `;
+        const bodyEl = document.createElement("div");
+        bodyEl.className = "sgp-toast-body";
 
-        // Close button
-        toast.querySelector(".sgp-toast-close").addEventListener("click", () => {
+        const titleEl = document.createElement("div");
+        titleEl.className = "sgp-toast-title";
+        titleEl.textContent = String(title ?? "");
+
+        const messageEl = document.createElement("div");
+        messageEl.className = "sgp-toast-message";
+        messageEl.textContent = String(message ?? "");
+
+        bodyEl.appendChild(titleEl);
+        bodyEl.appendChild(messageEl);
+
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "sgp-toast-close";
+        closeBtn.type = "button";
+        closeBtn.textContent = "✕";
+        closeBtn.addEventListener("click", () => {
             dismissToast(toast);
         });
+
+        toast.appendChild(iconEl);
+        toast.appendChild(bodyEl);
+        toast.appendChild(closeBtn);
+        toast.__sgpTitleEl = titleEl;
+        toast.__sgpMessageEl = messageEl;
 
         container.appendChild(toast);
 
@@ -190,14 +215,14 @@
             });
         });
 
-        if (type === "loading") {
+        if (safeType === "loading") {
             currentLoadingToast = toast;
             // 兜底：后台异常中断时不要让加载卡片永久停留
             armLoadingTimeout(toast);
         }
 
         // Auto dismiss
-        if (autoDismiss && type !== "loading") {
+        if (autoDismiss && safeType !== "loading") {
             setTimeout(() => dismissToast(toast), 4000);
         }
 
@@ -220,10 +245,10 @@
     // 同一条 loading 卡片只更新文字，用于下载进度这类高频状态
     function updateToast(toast, title, message) {
         if (!toast || !toast.parentNode) return;
-        const titleEl = toast.querySelector(".sgp-toast-title");
-        const messageEl = toast.querySelector(".sgp-toast-message");
-        if (titleEl) titleEl.textContent = String(title);
-        if (messageEl) messageEl.textContent = String(message);
+        const titleEl = toast.__sgpTitleEl || toast.querySelector(".sgp-toast-title");
+        const messageEl = toast.__sgpMessageEl || toast.querySelector(".sgp-toast-message");
+        if (titleEl) titleEl.textContent = String(title ?? "");
+        if (messageEl) messageEl.textContent = String(message ?? "");
         armLoadingTimeout(toast);
     }
 
@@ -237,20 +262,16 @@
         }, 180000);
     }
 
-    function escapeHtml(str) {
-        const div = document.createElement("div");
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
     // --------------------------------------------------
     // 记录右键位置的图片元素，供 Live Photo 查找配套视频使用
     // --------------------------------------------------
     let lastContextImage = null;
     let lastContextVideo = null;
+    let disposed = false;
+    const domAbort = typeof AbortController === "function" ? new AbortController() : null;
 
     // 判断某个元素应该对应哪种菜单文案
-    function menuModeOf(el) {
+    function computeMenuMode(el) {
         if (!el) return "photo";
         try {
             if (el.tagName === "VIDEO") {
@@ -269,11 +290,28 @@
         return "photo";
     }
 
+    function menuModeOf(el, forceRefresh = false) {
+        if (!el) return "photo";
+        const now = Date.now();
+        if (!forceRefresh && menuModeCache && typeof el === "object") {
+            const cached = menuModeCache.get(el);
+            if (cached && now - cached.time < MENU_MODE_CACHE_TTL_MS) {
+                return cached.mode;
+            }
+        }
+        const mode = computeMenuMode(el);
+        if (menuModeCache && typeof el === "object") {
+            menuModeCache.set(el, { mode, time: now });
+        }
+        return mode;
+    }
+
     let publishedMode = null;
     let lastHoverTarget = null;
 
-    function publishMenuMode(el) {
-        const mode = menuModeOf(el);
+    function publishMenuMode(el, forceRefresh = false) {
+        if (disposed) return;
+        const mode = menuModeOf(el, forceRefresh);
         if (mode === publishedMode) return;
         publishedMode = mode;
         chrome.runtime
@@ -281,22 +319,34 @@
             .catch(() => { });
     }
 
+    function addDocListener(type, handler, capture = true) {
+        if (domAbort) {
+            document.addEventListener(type, handler, { capture, signal: domAbort.signal });
+        } else {
+            document.addEventListener(type, handler, capture);
+        }
+    }
+
     // 鼠标进入图片时就预判。右键那一刻菜单已经开始渲染，
     // 等到 contextmenu 再更新会慢一拍，第一次总是显示上一次的文案。
-    document.addEventListener("mouseover", (event) => {
+    const onMouseOver = (event) => {
+        if (disposed) return;
         const target = event.target;
         if (!target || (target.tagName !== "IMG" && target.tagName !== "VIDEO")) return;
         if (target === lastHoverTarget) return;
         lastHoverTarget = target;
-        publishMenuMode(target);
-    }, true);
+        publishMenuMode(target, false);
+    };
+    addDocListener("mouseover", onMouseOver, true);
 
-    document.addEventListener("contextmenu", (event) => {
+    const onContextMenuTarget = (event) => {
+        if (disposed) return;
         const target = event.target;
         lastContextImage = target && target.tagName === "IMG" ? target : null;
         lastContextVideo = target && target.tagName === "VIDEO" ? target : null;
-        publishMenuMode(target);
-    }, true);
+        publishMenuMode(target, true);
+    };
+    addDocListener("contextmenu", onContextMenuTarget, true);
 
     function absoluteUrl(url) {
         if (!url) return null;
@@ -642,18 +692,15 @@
     // 菜单点击后按坐标找出最上层的媒体元素。
     let lastContextPoint = null;
 
-    document.addEventListener(
-        "contextmenu",
-        (event) => {
-            if (!event.isTrusted) return;
-            lastContextPoint = {
-                x: event.clientX,
-                y: event.clientY,
-                time: Date.now(),
-            };
-        },
-        true
-    );
+    const onContextMenuPoint = (event) => {
+        if (disposed || !event.isTrusted) return;
+        lastContextPoint = {
+            x: event.clientX,
+            y: event.clientY,
+            time: Date.now(),
+        };
+    };
+    addDocListener("contextmenu", onContextMenuPoint, true);
 
     // 背景图样式的地址提取。渐变背景匹配不到 url()，会被跳过。
     function backgroundImageUrl(el) {
@@ -678,15 +725,34 @@
             if (el.tagName === "IMG") {
                 const candidates = imageCandidates(el);
                 if (candidates.length) {
-                    return { ok: true, kind: "image", url: candidates[0], candidates };
+                    lastContextImage = el;
+                    lastContextVideo = null;
+                    const pair = describeMediaElements(null, el);
+                    return {
+                        ok: true,
+                        kind: "image",
+                        url: candidates[0],
+                        candidates,
+                        livePhoto: pair.found ? pair : null,
+                    };
                 }
                 continue;
             }
 
             if (el.tagName === "VIDEO") {
-                const url = absoluteUrl(el.currentSrc || el.getAttribute("src"));
+                const pair = describeMediaElements(el, null);
+                const url = pair.videoUrl || absoluteUrl(el.currentSrc || el.getAttribute("src"));
                 if (url) {
-                    return { ok: true, kind: "video", url, candidates: [url] };
+                    lastContextVideo = el;
+                    lastContextImage = null;
+                    return {
+                        ok: true,
+                        kind: "video",
+                        url,
+                        candidates: [url],
+                        videoDuration: pair.videoDuration,
+                        livePhoto: pair.found ? pair : null,
+                    };
                 }
                 continue;
             }
@@ -847,7 +913,7 @@
 
     // 与后台 isLongVideo 保持相同边界：超过 10 秒才按长视频保存。
     function pickerVideoKind(duration, imageUrl) {
-        return imageUrl && !(Number.isFinite(duration) && duration > 10) ? "live" : "video";
+        return imageUrl && !(Number.isFinite(duration) && duration > MAX_LIVE_PHOTO_SECONDS) ? "live" : "video";
     }
 
     function videoUnavailableReason(url, imageUrl, kind) {
@@ -1253,7 +1319,8 @@
     // --------------------------------------------------
     // Listen for messages from background service worker
     // --------------------------------------------------
-    chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+    const onRuntimeMessage = (request, _sender, sendResponse) => {
+        if (disposed) return;
         if (request.action === "showToast") {
             createToast(request.type, request.title, request.message);
         }
@@ -1330,5 +1397,25 @@
             sendResponse(result);
             return true;
         }
-    });
+    };
+
+    chrome.runtime.onMessage.addListener(onRuntimeMessage);
+
+    window.__sgpCleanup = () => {
+        disposed = true;
+        domAbort?.abort?.();
+        try {
+            document.removeEventListener?.("mouseover", onMouseOver, true);
+            document.removeEventListener?.("contextmenu", onContextMenuTarget, true);
+            document.removeEventListener?.("contextmenu", onContextMenuPoint, true);
+        } catch {
+            // 忽略不支持 removeEventListener 的环境
+        }
+        try {
+            chrome.runtime?.onMessage?.removeListener?.(onRuntimeMessage);
+        } catch {
+            // 忽略扩展上下文已断开的情况
+        }
+        closePicker();
+    };
 })();

@@ -169,6 +169,84 @@ body {
   color: #fff;
 }
 
+/* ---- Album ---- */
+.album-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.album-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.album-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9dc0fb;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-name:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+.album-create {
+  display: flex;
+  gap: 8px;
+}
+
+.album-create .btn {
+  width: auto;
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+.album-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.album-input:focus {
+  border-color: rgba(66, 133, 244, 0.6);
+}
+
+.album-hint {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.38);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.album-hint.error {
+  color: #f28b82;
+}
+
 /* ---- Recent activity ---- */
 .history {
   display: flex;

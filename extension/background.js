@@ -8,6 +8,13 @@ const GOOGLE_PHOTOS_UPLOAD_URL =
   "https://photoslibrary.googleapis.com/v1/uploads";
 const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
+const GOOGLE_PHOTOS_ALBUMS_URL = "https://photoslibrary.googleapis.com/v1/albums";
+// albums.list 在 2025 年 3 月的 API 收缩中移除，拿不到相册清单，
+// 只能把创建时返回的 id 存下来，后续上传时复用。
+const ALBUM_KEY = "sgp_album";
+// albums.batchAddMediaItems 单次上限 50 项，单个相册上限 20000 项
+const ALBUM_ADD_CHUNK = 50;
+const ALBUM_MAX_ITEMS = 20000;
 const CONTEXT_MENU_ID = "save-to-google-photos";
 // 覆盖层兜底入口。小红书、Instagram 会在图片上叠链接和渐变遮罩，右键
 // 落点被判定为普通页面时 image 菜单不会出现，这类站点用坐标反查补一个入口。
@@ -21,8 +28,6 @@ const DEFAULT_COVER_SITE_PATTERNS = [
 // Google Photos 单文件上限按官方口径 200 MB，超限只会由 API 侧失败，
 // 提前在本地拦下来可以给出可操作的提示。
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
-// 页面上下文回退要用 base64 跨进程传输，内存会翻倍，只处理中小文件
-const PAGE_FALLBACK_MAX_BYTES = 25 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 120000;
 
 const HISTORY_KEY = "sgp_history";
@@ -126,9 +131,9 @@ async function handleSave(tab, srcUrl, mediaType) {
   // 先确认页面上有没有 Live Photo 配对，再决定走合成还是普通上传
   const ctx = await requestContextPair(tabId);
 
-  // 右键的是视频，时长明显超出 Live Photo 的范围：按视频原文件保存
-  if (mediaType === "video" && ctx?.found && isLongVideo(ctx.videoDuration)) {
-    await handleSingleMedia(tabId, srcUrl || ctx.videoUrl, "video");
+  // 右键的是视频，时长明显超出 Live Photo 的范围：优先按视频原文件保存
+  if (mediaType === "video" && isLongVideo(ctx?.videoDuration)) {
+    await handleSingleMedia(tabId, srcUrl || ctx?.videoUrl, "video");
     return;
   }
 
@@ -145,7 +150,7 @@ function isLongVideo(seconds) {
   return Number.isFinite(seconds) && seconds > MAX_LIVE_PHOTO_SECONDS;
 }
 
-// 覆盖层站点：按右键坐标反查媒体元素，再走普通保存流程
+// 覆盖层站点：按右键坐标反查媒体元素，支持图片、视频以及页面组件自带的 Live Photo 配对
 async function handleSaveAtCursor(tab) {
   const tabId = tab?.id;
   const target = await requestAtCursor(tabId);
@@ -161,7 +166,16 @@ async function handleSaveAtCursor(tab) {
   }
 
   if (target.kind === "video") {
+    if (!isLongVideo(target.videoDuration) && target.livePhoto?.found && target.livePhoto.videoUrl) {
+      await handleLivePhoto(tab, target.url, "video", target.livePhoto);
+      return;
+    }
     await handleSingleMedia(tabId, target.url, "video");
+    return;
+  }
+
+  if (target.livePhoto?.found && target.livePhoto.videoUrl && !isLongVideo(target.livePhoto.videoDuration)) {
+    await handleLivePhoto(tab, target.url, "image", target.livePhoto);
     return;
   }
 
@@ -175,17 +189,16 @@ async function handleSaveAtCursor(tab) {
   );
 }
 
-function requestAtCursor(tabId) {
-  const message = { action: "resolveAtCursor" };
+function sendToTabWithInject(tabId, message) {
+  return chrome.tabs.sendMessage(tabId, message).catch(() =>
+    chrome.scripting
+      .executeScript({ target: { tabId }, files: ["content.js"] })
+      .then(() => chrome.tabs.sendMessage(tabId, message))
+  );
+}
 
-  return chrome.tabs
-    .sendMessage(tabId, message)
-    .catch(() =>
-      chrome.scripting
-        .executeScript({ target: { tabId }, files: ["content.js"] })
-        .then(() => chrome.tabs.sendMessage(tabId, message))
-    )
-    .catch(() => null);
+function requestAtCursor(tabId) {
+  return sendToTabWithInject(tabId, { action: "resolveAtCursor" }).catch(() => null);
 }
 
 // --------------------------------------------------
@@ -247,18 +260,31 @@ async function saveOne(tabId, url, kind, options = {}) {
       );
     }
 
-    await withAuthRetry(async (token) => {
+    // 批量模式由 runBatch 传入共享数组，单张模式在这里自己归入相册
+    const albumIds = Array.isArray(options.albumIds) ? options.albumIds : [];
+    const ownsAlbum = !Array.isArray(options.albumIds);
+
+    const mediaItemId = await withAuthRetry(async (token) => {
       const uploadToken = await uploadBytes(token, media.blob, media.mimeType, media.fileName);
-      await createMediaItem(token, uploadToken, media.fileName, url);
+      return createMediaItem(token, uploadToken, media.fileName, url);
     });
+    if (mediaItemId) albumIds.push(mediaItemId);
 
     await markSeen(fp);
+
+    let albumNote = "";
+    if (ownsAlbum) {
+      const archived = await archiveToAlbum(albumIds);
+      if (archived.error) albumNote = ` · ${archived.error}`;
+      else if (archived.added) albumNote = ` · added to "${archived.albumTitle}"`;
+    }
+
     await addHistory({
       status: "saved",
       kind,
       name: media.fileName,
       url: shortUrl(url),
-      message: formatBytes(media.size),
+      message: formatBytes(media.size) + albumNote,
     });
 
     if (!quiet) {
@@ -266,7 +292,7 @@ async function saveOne(tabId, url, kind, options = {}) {
         tabId,
         "success",
         "Saved!",
-        `${label === "video" ? "Video" : "Image"} saved to Google Photos (${formatBytes(media.size)})`
+        `${label === "video" ? "Video" : "Image"} saved to Google Photos (${formatBytes(media.size)})${albumNote}`
       );
     }
     return "saved";
@@ -382,6 +408,7 @@ async function downloadMedia(tabId, url, kind, onProgress) {
     bytes = result.bytes;
     mimeType = result.mimeType;
   } catch (err) {
+    if (err.tooLarge) throw err;
     // 防盗链站点会按 Referer 拒绝扩展进程，页面上下文带着同源 Referer 往往能拿到
     console.warn("[Save to Google Photos] 直接下载失败，回退页面上下文", url, err.message);
     const fallback = await fetchViaPage(tabId, url);
@@ -395,6 +422,14 @@ async function downloadMedia(tabId, url, kind, onProgress) {
   const blob = new Blob([bytes], { type: mimeType });
 
   return { blob, bytes, mimeType, size, fileName };
+}
+
+function tooLargeError(size) {
+  const err = new Error(
+    `This file is ${formatBytes(size)}, above the ${formatBytes(MAX_UPLOAD_BYTES)} Google Photos upload limit.`
+  );
+  err.tooLarge = true;
+  return err;
 }
 
 async function fetchWithProgress(url, onProgress) {
@@ -432,10 +467,22 @@ async function fetchWithProgress(url, onProgress) {
 
   const mimeType = normalizeContentType(response.headers.get("content-type"));
   const total = Number(response.headers.get("content-length")) || 0;
+  if (total > MAX_UPLOAD_BYTES) {
+    clearTimeout(timer);
+    controller.abort();
+    throw tooLargeError(total);
+  }
 
   let bytes;
   if (!response.body) {
-    bytes = new Uint8Array(await response.arrayBuffer());
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } finally {
+      clearTimeout(timer);
+    }
+    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
+      throw tooLargeError(bytes.byteLength);
+    }
   } else {
     const reader = response.body.getReader();
     const chunks = [];
@@ -444,8 +491,12 @@ async function fetchWithProgress(url, onProgress) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
         received += value.length;
+        if (received > MAX_UPLOAD_BYTES) {
+          controller.abort();
+          throw tooLargeError(received);
+        }
+        chunks.push(value);
         onProgress?.(received, total);
       }
     } finally {
@@ -465,22 +516,28 @@ async function fetchWithProgress(url, onProgress) {
 // 页面上下文抓字节：content script 的请求由页面发出，会带上站点需要的 Referer
 async function fetchViaPage(tabId, url) {
   if (!tabId) {
-    throw new Error("The file could not be downloaded and there is no page available to retry from.");
+    const err = new Error("The file could not be downloaded and there is no page available to retry from.");
+    err.downloadFailed = true;
+    throw err;
   }
 
   let response;
   try {
     response = await chrome.tabs.sendMessage(tabId, { action: "fetchAsBase64", url });
   } catch {
-    throw new Error("The file could not be downloaded, and the page could not be reached to retry.");
+    const err = new Error("The file could not be downloaded, and the page could not be reached to retry.");
+    err.downloadFailed = true;
+    throw err;
   }
 
   if (!response || !response.ok) {
-    throw new Error(
+    const err = new Error(
       response?.error
         ? `Could not download this file: ${response.error}`
         : "Could not download this file, even from the page context."
     );
+    err.downloadFailed = true;
+    throw err;
   }
 
   const bytes = base64ToBytes(response.base64);
@@ -523,18 +580,22 @@ function extensionOf(url) {
 
 function buildFileName(url, mimeType, kind) {
   const ext = extensionOf(url) || extFromMime(mimeType) || (kind === "video" ? "mp4" : "jpg");
+  const usable = sanitizeAsciiBase(url) || `photo_${Date.now()}`;
+  return `${usable}.${ext}`;
+}
+
+function sanitizeAsciiBase(url) {
   let base = "";
   try {
     const last = new URL(url).pathname.split("/").filter(Boolean).pop();
-    if (last) base = safeDecode(last.replace(/\.[^.]+$/, ""));
+    if (last) base = safeDecode(last.split("?")[0].replace(/\.[^.]+$/, ""));
   } catch {
     // 忽略，走默认名
   }
 
   // X-Goog-Upload-File-Name 只接受 ASCII，中文文件名会让 fetch 直接抛错
   const ascii = base.replace(/[^\x20-\x7E]/g, "").replace(/["\\/:*?<>|]/g, "_").trim();
-  const usable = /[a-zA-Z0-9]/.test(ascii) ? ascii : `photo_${Date.now()}`;
-  return `${usable.slice(0, 120)}.${ext}`;
+  return /[a-zA-Z0-9]/.test(ascii) ? ascii.slice(0, 120) : "";
 }
 
 function safeDecode(value) {
@@ -654,7 +715,125 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
     throw new Error(`Media item error: ${item.status.message}`);
   }
 
-  return result;
+  // 归入相册需要 mediaItem id，顺便把上传结果里的 id 带出去
+  return item?.mediaItem?.id || "";
+}
+
+// --------------------------------------------------
+// 6b. 相册：创建、绑定、把已上传的项归入相册
+// --------------------------------------------------
+async function getAlbumSetting() {
+  const value = await storageGet(ALBUM_KEY);
+  if (!value || typeof value.id !== "string" || !value.id) return null;
+  return value;
+}
+
+function setAlbumSetting(album) {
+  return storageSet(ALBUM_KEY, album);
+}
+
+function clearAlbumSetting() {
+  return storageSet(ALBUM_KEY, null);
+}
+
+async function createAlbum(token, title) {
+  const response = await fetch(GOOGLE_PHOTOS_ALBUMS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ album: { title } }),
+  });
+
+  if (!response.ok) {
+    throw httpError("Create album", response, await response.text());
+  }
+
+  const album = await response.json();
+  if (!album?.id) {
+    throw new Error("Google Photos returned an album without an id.");
+  }
+  // 只读相册无法再写入，提前失败比每张图都归组失败更好说明问题
+  if (album.isWriteable === false) {
+    throw new Error("Google Photos created this album as read-only, so grouping would fail.");
+  }
+
+  return {
+    id: album.id,
+    title: album.title || title,
+    productUrl: album.productUrl || "",
+    itemCount: 0,
+  };
+}
+
+async function addMediaItemsToAlbum(token, albumId, mediaItemIds) {
+  const ids = (mediaItemIds || []).filter(Boolean).slice(0, ALBUM_ADD_CHUNK);
+  if (!ids.length) return;
+
+  const response = await fetch(
+    `${GOOGLE_PHOTOS_ALBUMS_URL}/${encodeURIComponent(albumId)}:batchAddMediaItems`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mediaItemIds: ids }),
+    }
+  );
+
+  if (!response.ok) {
+    throw httpError("Add to album", response, await response.text());
+  }
+}
+
+function isAlbumGone(err) {
+  return err?.status === 404;
+}
+
+// 归档是保存之外的附加动作：失败只影响归类，已上传的图片仍然算保存成功。
+async function archiveToAlbum(mediaItemIds) {
+  const ids = (mediaItemIds || []).filter(Boolean);
+  if (!ids.length) return { added: 0, albumTitle: "", error: "" };
+
+  const album = await getAlbumSetting();
+  if (!album) return { added: 0, albumTitle: "", error: "" };
+
+  try {
+    await withAuthRetry(async (token) => {
+      for (let i = 0; i < ids.length; i += ALBUM_ADD_CHUNK) {
+        await addMediaItemsToAlbum(token, album.id, ids.slice(i, i + ALBUM_ADD_CHUNK));
+      }
+    });
+  } catch (err) {
+    console.error("[Save to Google Photos] Album", err);
+    if (isAlbumGone(err)) {
+      // 相册被用户删掉后 id 会一直失效，清掉绑定避免后续每张都报错
+      await clearAlbumSetting();
+      return {
+        added: 0,
+        albumTitle: "",
+        error: `Album "${album.title}" no longer exists, files went to the library only.`,
+        cleared: true,
+      };
+    }
+    return {
+      added: 0,
+      albumTitle: "",
+      error: `Could not add to album: ${err.message || err}`,
+    };
+  }
+
+  const total = (album.itemCount || 0) + ids.length;
+  await setAlbumSetting({ ...album, itemCount: total });
+
+  const overflow =
+    total > ALBUM_MAX_ITEMS
+      ? ` Album may exceed the ${ALBUM_MAX_ITEMS}-item limit soon.`
+      : "";
+
+  return { added: ids.length, albumTitle: album.title, error: "", warning: overflow };
 }
 
 // --------------------------------------------------
@@ -670,6 +849,8 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
     return "failed";
   }
 
+  const fallbackCover = ctx?.imageUrl || (mediaType !== "video" && isHttpUrl(srcUrl) ? srcUrl : "");
+
   try {
     report(tabId, "loading", "Looking for the pair…", "Checking this page for the matching photo or video.");
 
@@ -679,14 +860,17 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
       pair = await resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx);
     } catch (err) {
       // 动态段是 blob 且页面也读不到时，封面通常仍然可用，退回只保存封面
-      if (isCoverFallbackError(err, ctx)) {
+      if (isCoverFallbackError(err, fallbackCover)) {
         report(
           tabId,
           "loading",
           "Saving cover only…",
           "The motion clip could not be read, so the cover image is saved instead."
         );
-        return saveOne(tabId, ctx.imageUrl, "image", { quiet });
+        return saveOne(tabId, fallbackCover, "image", {
+          quiet,
+          albumIds: options.albumIds,
+        });
       }
       throw err;
     }
@@ -701,13 +885,17 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
       report(tabId, "loading", "Downloading cover image…", detail);
     });
     const jpegBytes = await ensureJpeg(photo.bytes, pair.imageUrl, tabId);
-    const result = self.MotionPhoto.assemble(
-      jpegBytes,
-      new Uint8Array(pair.videoBytes)
-    );
+    const videoBytes = pair.videoBytes instanceof Uint8Array
+      ? pair.videoBytes
+      : new Uint8Array(pair.videoBytes);
+    const estimatedTotal = jpegBytes.byteLength + videoBytes.byteLength;
+    if (estimatedTotal > MAX_UPLOAD_BYTES) {
+      throw tooLargeError(estimatedTotal);
+    }
+    const result = self.MotionPhoto.assemble(jpegBytes, videoBytes);
 
     // 同一组照片和视频重复合成会生成重复条目，用地址加动态段长度做指纹
-    const fp = fingerprint(pair.imageUrl, `live:${new Uint8Array(pair.videoBytes).length}`);
+    const fp = fingerprint(pair.imageUrl, `live:${videoBytes.byteLength}`);
     if (await isSeen(fp)) {
       await addHistory({
         status: "skipped",
@@ -737,18 +925,30 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
       "Saving Live Photo to Google Photos…"
     );
     const blob = new Blob([result.bytes], { type: "image/jpeg" });
-    await withAuthRetry(async (token) => {
+    const albumIds = Array.isArray(options.albumIds) ? options.albumIds : [];
+    const ownsAlbum = !Array.isArray(options.albumIds);
+
+    const mediaItemId = await withAuthRetry(async (token) => {
       const uploadToken = await uploadBytes(token, blob, "image/jpeg", fileName);
-      await createMediaItem(token, uploadToken, fileName, pair.imageUrl);
+      return createMediaItem(token, uploadToken, fileName, pair.imageUrl);
     });
+    if (mediaItemId) albumIds.push(mediaItemId);
 
     await markSeen(fp);
+
+    let albumNote = "";
+    if (ownsAlbum) {
+      const archived = await archiveToAlbum(albumIds);
+      if (archived.error) albumNote = ` · ${archived.error}`;
+      else if (archived.added) albumNote = ` · added to "${archived.albumTitle}"`;
+    }
+
     await addHistory({
       status: "saved",
       kind: "live",
       name: fileName,
       url: shortUrl(pair.imageUrl),
-      message: formatBytes(size),
+      message: formatBytes(size) + albumNote,
     });
 
     const note = result.warnings.length ? ` (${result.warnings.join("; ")})` : "";
@@ -756,7 +956,7 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
       tabId,
       "success",
       "Live Photo Saved!",
-      `Still ${formatBytes(result.stillSize)} + motion ${formatBytes(result.videoSize)}${note}`
+      `Still ${formatBytes(result.stillSize)} + motion ${formatBytes(result.videoSize)}${note}${albumNote}`
     );
     return "saved";
   } catch (err) {
@@ -775,11 +975,15 @@ async function handleLivePhoto(tab, srcUrl, mediaType, ctx, options = {}) {
   }
 }
 
-// 动态段取不到但封面可用时，允许降级保存封面
-function isCoverFallbackError(err, ctx) {
-  const cover = ctx?.imageUrl;
-  if (!cover || !/^https?:/i.test(cover)) return false;
-  return /blob|failed to fetch|network error|could not be downloaded|not an MP4 container/i.test(err?.message || "");
+// 动态段取不到但封面可用时，允许降级保存封面；超限错误不降级
+function isCoverFallbackError(err, coverOrCtx) {
+  if (!err || err.tooLarge) return false;
+  const cover = typeof coverOrCtx === "string" ? coverOrCtx : coverOrCtx?.imageUrl;
+  if (!isHttpUrl(cover)) return false;
+  if (err.downloadFailed || err.notMp4) return true;
+  return /blob|failed to fetch|network error|could not (?:download|be downloaded)|not an MP4 container/i.test(
+    err.message || ""
+  );
 }
 
 // 根据右键入口返回 { imageUrl, videoBytes, via }
@@ -811,21 +1015,25 @@ async function resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx) {
 
     assertFetchable(imageUrl, "cover image");
     const video = await fetchBytes(videoUrl, tabId);
-    if (!self.MotionPhoto.isMp4(new Uint8Array(video.bytes))) {
-      throw new Error(
+    const videoBytes = video.bytes instanceof Uint8Array ? video.bytes : new Uint8Array(video.bytes);
+    if (!self.MotionPhoto.isMp4(videoBytes)) {
+      const err = new Error(
         `The video is not an MP4 container, so it cannot be packaged as a Motion Photo: ${shortUrl(videoUrl)}`
       );
+      err.notMp4 = true;
+      throw err;
     }
 
-    return { imageUrl, videoBytes: video.bytes, via };
+    return { imageUrl, videoBytes, via };
   }
 
   // 图片入口：视频优先取页面数据，其次按元素和同名规则探测
   if (fromContext?.videoUrl) {
     assertFetchable(fromContext.videoUrl, "video");
     const video = await fetchBytes(fromContext.videoUrl, tabId);
-    if (self.MotionPhoto.isMp4(new Uint8Array(video.bytes))) {
-      return { imageUrl: srcUrl, videoBytes: video.bytes, via: fromContext.via };
+    const videoBytes = video.bytes instanceof Uint8Array ? video.bytes : new Uint8Array(video.bytes);
+    if (self.MotionPhoto.isMp4(videoBytes)) {
+      return { imageUrl: srcUrl, videoBytes, via: fromContext.via };
     }
   }
 
@@ -841,37 +1049,16 @@ async function resolveLivePhotoPair(tabId, srcUrl, mediaType, ctx) {
 }
 
 function requestVideoSource(tabId, imageUrl) {
-  const message = { action: "findLivePhotoVideo", imageUrl };
-
-  return chrome.tabs.sendMessage(tabId, message).catch(() =>
-    chrome.scripting
-      .executeScript({ target: { tabId }, files: ["content.js"] })
-      .then(() => chrome.tabs.sendMessage(tabId, message))
-  );
+  return sendToTabWithInject(tabId, { action: "findLivePhotoVideo", imageUrl });
 }
 
 function requestCoverImage(tabId, videoUrl) {
-  const message = { action: "findLivePhotoCover", videoUrl };
-
-  return chrome.tabs.sendMessage(tabId, message).catch(() =>
-    chrome.scripting
-      .executeScript({ target: { tabId }, files: ["content.js"] })
-      .then(() => chrome.tabs.sendMessage(tabId, message))
-  );
+  return sendToTabWithInject(tabId, { action: "findLivePhotoCover", videoUrl });
 }
 
 // 向页面索取右键位置的完整配对信息，失败时返回 null 而不是抛错
 function requestContextPair(tabId) {
-  const message = { action: "findLivePhotoFromContext" };
-
-  return chrome.tabs
-    .sendMessage(tabId, message)
-    .catch(() =>
-      chrome.scripting
-        .executeScript({ target: { tabId }, files: ["content.js"] })
-        .then(() => chrome.tabs.sendMessage(tabId, message))
-    )
-    .catch(() => null);
+  return sendToTabWithInject(tabId, { action: "findLivePhotoFromContext" }).catch(() => null);
 }
 
 // Motion Photo 的主图必须是 JPEG。非 JPEG 用 OffscreenCanvas 转码。
@@ -928,6 +1115,7 @@ async function fetchBytes(url, tabId, onProgress) {
     const result = await fetchWithProgress(url, onProgress);
     return result;
   } catch (err) {
+    if (err.tooLarge) throw err;
     console.warn("[Save to Google Photos] 下载失败，尝试页面上下文", shortUrl(url), err.message);
     return fetchViaPage(tabId, url);
   }
@@ -944,8 +1132,9 @@ async function resolveVideoBytes(source, tabId) {
   for (const url of urls.slice(0, 6)) {
     try {
       const media = await fetchBytes(url, tabId);
-      if (self.MotionPhoto.isMp4(new Uint8Array(media.bytes))) {
-        return { bytes: media.bytes, url };
+      const videoBytes = media.bytes instanceof Uint8Array ? media.bytes : new Uint8Array(media.bytes);
+      if (self.MotionPhoto.isMp4(videoBytes)) {
+        return { bytes: videoBytes, url };
       }
     } catch (err) {
       console.warn("[Save to Google Photos] 候选视频不可用", url, err);
@@ -955,18 +1144,7 @@ async function resolveVideoBytes(source, tabId) {
 }
 
 function buildMotionPhotoName(url) {
-  let name = "photo";
-  try {
-    const last = new URL(url).pathname.split("/").filter(Boolean).pop();
-    if (last) name = safeDecode(last);
-  } catch {
-    // 忽略，用默认名
-  }
-
-  name = name.split("?")[0];
-  const base = name.replace(/\.[^.]+$/, "");
-  const ascii = base.replace(/[^\x20-\x7E]/g, "").replace(/["\\/:*?<>|]/g, "_").trim();
-  return `${/[a-zA-Z0-9]/.test(ascii) ? ascii.slice(0, 120) : "photo"}.MP.jpg`;
+  return `${sanitizeAsciiBase(url) || "photo"}.MP.jpg`;
 }
 
 function shortUrl(url) {
@@ -988,20 +1166,7 @@ function formatBytes(bytes) {
 // 8. 批量保存：由 popup 触发，逐个上传
 // --------------------------------------------------
 async function saveAllImages(tabId, limit = 20) {
-  let listed;
-  try {
-    listed = await chrome.tabs.sendMessage(tabId, { action: "collectImages" });
-  } catch {
-    await chrome.scripting
-      .executeScript({ target: { tabId }, files: ["content.js"] })
-      .catch(() => {});
-    try {
-      listed = await chrome.tabs.sendMessage(tabId, { action: "collectImages" });
-    } catch {
-      listed = null;
-    }
-  }
-
+  const listed = await sendToTabWithInject(tabId, { action: "collectImages" }).catch(() => null);
   const entries = normalizeBatchEntries(listed, limit);
   return runBatch(tabId, entries, "No large images were found on this page.");
 }
@@ -1014,6 +1179,8 @@ async function runBatch(tabId, entries, emptyMessage) {
   }
 
   const counts = { total: entries.length, saved: 0, skipped: 0, failed: 0 };
+  // 整批只归入一次相册，比每张单独调用少一轮请求
+  const albumIds = [];
 
   for (let i = 0; i < entries.length; i++) {
     showToast(
@@ -1022,11 +1189,16 @@ async function runBatch(tabId, entries, emptyMessage) {
       `Saving ${i + 1} of ${entries.length}…`,
       "Uploading the selected images, videos and Live Photos."
     );
-    const outcome = await saveWithCandidates(tabId, entries[i]);
+    const outcome = await saveWithCandidates(tabId, entries[i], { albumIds });
     counts[outcome] = (counts[outcome] || 0) + 1;
     // 轻微间隔，避免并发限流
     await delay(250);
   }
+
+  const archived = await archiveToAlbum(albumIds);
+  let albumNote = "";
+  if (archived.error) albumNote = ` ${archived.error}`;
+  else if (archived.added) albumNote = ` Added ${archived.added} to "${archived.albumTitle}".`;
 
   const parts = [`${counts.saved} saved`];
   if (counts.skipped) parts.push(`${counts.skipped} skipped`);
@@ -1036,7 +1208,7 @@ async function runBatch(tabId, entries, emptyMessage) {
     tabId,
     counts.failed ? "error" : "success",
     counts.failed ? "Finished with errors" : "Batch finished",
-    `${parts.join(", ")} out of ${counts.total}.`
+    `${parts.join(", ")} out of ${counts.total}.${albumNote}`
   );
 
   if (counts.failed) {
@@ -1050,23 +1222,43 @@ async function runBatch(tabId, entries, emptyMessage) {
   return counts;
 }
 
+function isHttpUrl(url) {
+  return typeof url === "string" && /^https?:/i.test(url);
+}
+
+function isHttpOrBlobUrl(url) {
+  return typeof url === "string" && /^(https?|blob):/i.test(url);
+}
+
 // 用户在选择面板里勾选后提交的媒体，保留每张卡片的配对和时长快照。
 async function saveSelectedItems(tabId, items) {
   const entries = (Array.isArray(items) ? items : [])
     .filter((item) => item && typeof item.url === "string" && !item.unavailableReason)
     .slice(0, 60)
-    .map((item) => ({
-      url: item.url,
-      kind: item.kind === "live" || item.kind === "video"
-        ? (typeof item.imageUrl === "string" && item.imageUrl && !isLongVideo(item.videoDuration) ? "live" : "video")
-        : "image",
-      imageUrl: typeof item.imageUrl === "string" ? item.imageUrl : "",
-      videoDuration: Number.isFinite(item.videoDuration) ? item.videoDuration : undefined,
-      candidates:
+    .map((item) => {
+      const isMedia = item.kind === "live" || item.kind === "video";
+      const imageUrl = isHttpUrl(item.imageUrl) ? item.imageUrl : "";
+      const kind = isMedia
+        ? (imageUrl && !isLongVideo(item.videoDuration) ? "live" : "video")
+        : "image";
+      const candidates = (
         Array.isArray(item.candidates) && item.candidates.length
           ? item.candidates
-          : [item.url],
-    }));
+          : [item.url]
+      ).filter(isHttpUrl);
+      const validUrl = kind === "live"
+        ? (isHttpOrBlobUrl(item.url) ? item.url : "")
+        : (isHttpUrl(item.url) ? item.url : (candidates[0] || ""));
+      if (!validUrl) return null;
+      return {
+        url: validUrl,
+        kind,
+        imageUrl,
+        videoDuration: Number.isFinite(item.videoDuration) ? item.videoDuration : undefined,
+        candidates: candidates.length ? candidates : [validUrl],
+      };
+    })
+    .filter(Boolean);
 
   return runBatch(tabId, entries, "No media were selected.");
 }
@@ -1104,9 +1296,11 @@ async function saveWithCandidates(tabId, entry, options = {}) {
     return handleLivePhoto({ id: tabId }, entry.url, "video", {
       found: true, videoUrl: entry.url, imageUrl: entry.imageUrl,
       videoDuration: entry.videoDuration, via: "media picker",
-    }, { quiet });
+    }, { quiet, albumIds: options.albumIds });
   }
-  if (entry.kind === "video") return saveOne(tabId, entry.url, "video", { quiet });
+  if (entry.kind === "video") {
+    return saveOne(tabId, entry.url, "video", { quiet, albumIds: options.albumIds });
+  }
   const candidates = (
     Array.isArray(entry.candidates) && entry.candidates.length
       ? entry.candidates
@@ -1117,6 +1311,7 @@ async function saveWithCandidates(tabId, entry, options = {}) {
     const isLast = i === candidates.length - 1;
     const outcome = await saveOne(tabId, candidates[i], "image", {
       quiet,
+      albumIds: options.albumIds,
       // 中间候选失败不写历史也不弹错误，只把最后一个候选的原因露出来
       quietFailure: !isLast,
       suppressFailureHistory: !isLast,
@@ -1146,18 +1341,28 @@ function storageSet(key, value) {
   });
 }
 
-async function addHistory(entry) {
-  const list = (await storageGet(HISTORY_KEY)) || [];
-  list.unshift({ ...entry, time: Date.now() });
-  await storageSet(HISTORY_KEY, list.slice(0, HISTORY_MAX));
+let storageQueue = Promise.resolve();
+
+function withStorageLock(task) {
+  const run = storageQueue.then(task, task);
+  storageQueue = run.catch(() => {});
+  return run;
+}
+
+function addHistory(entry) {
+  return withStorageLock(async () => {
+    const list = (await storageGet(HISTORY_KEY)) || [];
+    list.unshift({ ...entry, time: Date.now() });
+    await storageSet(HISTORY_KEY, list.slice(0, HISTORY_MAX));
+  });
 }
 
 async function readHistory() {
   return (await storageGet(HISTORY_KEY)) || [];
 }
 
-async function clearHistory() {
-  await storageSet(HISTORY_KEY, []);
+function clearHistory() {
+  return withStorageLock(() => storageSet(HISTORY_KEY, []));
 }
 
 // 同一地址重复点击会生成两份文件，用「去查询串的地址 + 字节数」做指纹
@@ -1177,11 +1382,13 @@ async function isSeen(fp) {
   return seen.includes(fp);
 }
 
-async function markSeen(fp) {
-  const seen = (await storageGet(SEEN_KEY)) || [];
-  if (seen.includes(fp)) return;
-  seen.unshift(fp);
-  await storageSet(SEEN_KEY, seen.slice(0, SEEN_MAX));
+function markSeen(fp) {
+  return withStorageLock(async () => {
+    const seen = (await storageGet(SEEN_KEY)) || [];
+    if (seen.includes(fp)) return;
+    seen.unshift(fp);
+    await storageSet(SEEN_KEY, seen.slice(0, SEEN_MAX));
+  });
 }
 
 // --------------------------------------------------
@@ -1226,39 +1433,33 @@ function showToast(tabId, type, title, message) {
 
   const payload = { action: "showToast", type, title, message };
 
-  chrome.tabs.sendMessage(tabId, payload).catch(() => {
-    // 内容脚本可能已经和扩展断开，注入新实例后再试一次
+  sendToTabWithInject(tabId, payload).catch(() => {
+    // 消息通道彻底不可用时，直接在页面里渲染提示，避免界面停在转圈
     chrome.scripting
-      .executeScript({ target: { tabId }, files: ["content.js"] })
-      .then(() => chrome.tabs.sendMessage(tabId, payload))
-      .catch(() => {
-        // 消息通道彻底不可用时，直接在页面里渲染提示，避免界面停在转圈
-        chrome.scripting
-          .executeScript({
-            target: { tabId },
-            func: (kind, text, detail) => {
-              const palette = {
-                loading: "#4285f4",
-                success: "#34a853",
-                error: "#ea4335",
-              };
-              const box = document.createElement("div");
-              box.setAttribute("data-sgp-fallback", "1");
-              box.textContent = detail ? `${text}｜${detail}` : text;
-              box.style.cssText = [
-                "position:fixed", "top:20px", "right:20px", "z-index:2147483647",
-                `background:${palette[kind] || "#333"}`, "color:#fff",
-                "padding:12px 18px", "border-radius:10px", "max-width:380px",
-                "font:13px/1.5 -apple-system,system-ui,sans-serif",
-                "box-shadow:0 8px 24px rgba(0,0,0,.3)", "word-break:break-word",
-              ].join(";");
-              document.documentElement.appendChild(box);
-              setTimeout(() => box.remove(), kind === "loading" ? 15000 : 6000);
-            },
-            args: [type, title, message],
-          })
-          .catch(() => {});
-      });
+      .executeScript({
+        target: { tabId },
+        func: (kind, text, detail) => {
+          const palette = {
+            loading: "#4285f4",
+            success: "#34a853",
+            error: "#ea4335",
+          };
+          const box = document.createElement("div");
+          box.setAttribute("data-sgp-fallback", "1");
+          box.textContent = detail ? `${text}｜${detail}` : text;
+          box.style.cssText = [
+            "position:fixed", "top:20px", "right:20px", "z-index:2147483647",
+            `background:${palette[kind] || "#333"}`, "color:#fff",
+            "padding:12px 18px", "border-radius:10px", "max-width:380px",
+            "font:13px/1.5 -apple-system,system-ui,sans-serif",
+            "box-shadow:0 8px 24px rgba(0,0,0,.3)", "word-break:break-word",
+          ].join(";");
+          document.documentElement.appendChild(box);
+          setTimeout(() => box.remove(), kind === "loading" ? 15000 : 6000);
+        },
+        args: [type, title, message],
+      })
+      .catch(() => {});
   });
 }
 
@@ -1288,9 +1489,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === "signOut") {
     chrome.identity.getAuthToken({ interactive: false }, (token) => {
       if (token) {
-        // Revoke the token on Google's side
-        fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
-          .catch(() => { });
+        // Revoke the token via POST body so credentials are not placed in URL query strings
+        fetch("https://oauth2.googleapis.com/revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ token }).toString(),
+        }).catch(() => {});
         // Remove cached token
         chrome.identity.removeCachedAuthToken({ token }, () => {
           sendResponse({ success: true });
@@ -1337,6 +1541,35 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   if (request.action === "clearHistory") {
     clearHistory()
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "getAlbum") {
+    getAlbumSetting()
+      .then((album) => sendResponse({ success: true, album }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "createAlbum") {
+    const title = String(request.title || "").trim();
+    if (!title) {
+      sendResponse({ success: false, error: "Album name cannot be empty." });
+      return true;
+    }
+    withAuthRetry((token) => createAlbum(token, title))
+      .then(async (album) => {
+        await setAlbumSetting(album);
+        sendResponse({ success: true, album });
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "clearAlbum") {
+    clearAlbumSetting()
       .then(() => sendResponse({ success: true }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;

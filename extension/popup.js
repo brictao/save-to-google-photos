@@ -10,6 +10,14 @@ const signOutBtn = document.getElementById("signOutBtn");
 const saveAllBtn = document.getElementById("saveAllBtn");
 const historyList = document.getElementById("historyList");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+const albumCard = document.getElementById("albumCard");
+const albumCurrent = document.getElementById("albumCurrent");
+const albumLink = document.getElementById("albumLink");
+const albumCreateRow = document.getElementById("albumCreateRow");
+const albumTitle = document.getElementById("albumTitle");
+const albumCreateBtn = document.getElementById("albumCreateBtn");
+const albumUnbindBtn = document.getElementById("albumUnbindBtn");
+const albumHint = document.getElementById("albumHint");
 
 let signedIn = false;
 
@@ -51,6 +59,8 @@ function setSignedIn() {
     signOutBtn.style.display = "flex";
     saveAllBtn.style.display = "flex";
     saveAllBtn.disabled = false;
+    albumCard.style.display = "flex";
+    loadAlbum();
 }
 
 function setSignedOut() {
@@ -61,6 +71,7 @@ function setSignedOut() {
     signInBtn.style.display = "flex";
     signOutBtn.style.display = "none";
     saveAllBtn.style.display = "none";
+    albumCard.style.display = "none";
 }
 
 function setLoading(text) {
@@ -113,6 +124,11 @@ async function openPickerFromPopup(button) {
         return;
     }
 
+    if (tab.url && !/^https?:/i.test(tab.url)) {
+        statusHint.textContent = "This page does not allow extensions to read media.";
+        return;
+    }
+
     button.disabled = true;
     const message = { action: "openPicker" };
 
@@ -125,9 +141,9 @@ async function openPickerFromPopup(button) {
                 files: ["content.js"],
             });
             await chrome.tabs.sendMessage(tab.id, message);
-        } catch (err) {
+        } catch {
             button.disabled = false;
-            statusHint.textContent = err.message || "Cannot reach this page.";
+            statusHint.textContent = "Cannot access this page. Try reloading the tab.";
             return;
         }
     }
@@ -136,6 +152,86 @@ async function openPickerFromPopup(button) {
 }
 
 saveAllBtn.addEventListener("click", () => openPickerFromPopup(saveAllBtn));
+
+// --------------------------------------------------
+// Album
+// --------------------------------------------------
+const ALBUM_HINT = "New saves will be added to this album automatically.";
+
+async function loadAlbum() {
+    try {
+        const response = await sendMessage({ action: "getAlbum" });
+        renderAlbum(response.success ? response.album : null);
+    } catch {
+        renderAlbum(null);
+    }
+}
+
+function renderAlbum(album) {
+    const hasAlbum = Boolean(album && album.id);
+
+    albumCurrent.style.display = hasAlbum ? "block" : "none";
+    albumCreateRow.style.display = hasAlbum ? "none" : "flex";
+    albumUnbindBtn.style.display = hasAlbum ? "inline" : "none";
+    albumHint.className = "album-hint";
+
+    if (!hasAlbum) {
+        albumHint.textContent = "Create an album to group everything you save.";
+        return;
+    }
+
+    albumLink.textContent = album.title || "Album";
+    // productUrl 由 Google 返回，缺失时退回相册首页，避免链接不可用
+    albumLink.href = album.productUrl || "https://photos.google.com/albums";
+    albumHint.textContent = ALBUM_HINT;
+}
+
+albumCreateBtn.addEventListener("click", async () => {
+    const title = albumTitle.value.trim();
+    if (!title) {
+        albumHint.textContent = "Enter an album name first.";
+        albumHint.className = "album-hint error";
+        albumTitle.focus();
+        return;
+    }
+
+    albumCreateBtn.disabled = true;
+    albumCreateBtn.textContent = "Creating…";
+    albumHint.textContent = "Creating the album in Google Photos…";
+    albumHint.className = "album-hint";
+
+    try {
+        const response = await sendMessage({ action: "createAlbum", title });
+        if (response.success) {
+            albumTitle.value = "";
+            renderAlbum(response.album);
+        } else {
+            albumHint.textContent = response.error || "Could not create the album.";
+            albumHint.className = "album-hint error";
+        }
+    } catch (error) {
+        albumHint.textContent = error.message || "Could not create the album.";
+        albumHint.className = "album-hint error";
+    } finally {
+        albumCreateBtn.disabled = false;
+        albumCreateBtn.textContent = "Create";
+    }
+});
+
+albumTitle.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    albumCreateBtn.click();
+});
+
+albumUnbindBtn.addEventListener("click", async () => {
+    try {
+        await sendMessage({ action: "clearAlbum" });
+    } catch {
+        // ignore errors
+    }
+    renderAlbum(null);
+});
 
 clearHistoryBtn.addEventListener("click", async () => {
     try {

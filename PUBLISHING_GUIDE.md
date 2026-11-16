@@ -47,7 +47,7 @@
 | 字段 | 内容 |
 |------|------|
 | **Title** | Save to Google Photos |
-| **Summary** (132字以内) | Right-click any image on the web and save it directly to your Google Photos library. Fast, secure, and private. |
+| **Summary** (132字以内) | Right-click any image or video to save it straight to your Google Photos library. Live Photo and batch support, no download step. |
 | **Description** | 见下方 |
 | **Category** | Photos |
 | **Language** | English |
@@ -55,31 +55,45 @@
 **Description（完整描述）**：
 
 ```
-Save to Google Photos — The easiest way to save web images to your Google Photos library.
+Save to Google Photos
 
-🖱️ SIMPLE TO USE
-Just right-click any image on any web page and select "Save to Google Photos". That's it! The image will be uploaded directly to your Google Photos library.
+Right-click any image or video on a web page and it lands in your Google Photos library at full size. No download folder, no manual upload, no quality loss.
 
-🔒 SECURE & PRIVATE
-• Uses Google's official OAuth 2.0 authentication
-• No data is collected, stored, or shared
-• Images are uploaded directly to your account
-• Only "append" permission — cannot read or delete your photos
+WHY USE IT
+The usual route takes five steps: save the file, find it in your Downloads folder, open photos.google.com, upload it, then delete the local copy. This extension removes all of it. The file travels from the page straight to your library, at the resolution the page actually serves.
 
-📸 WIDE FORMAT SUPPORT
-Supports JPEG, PNG, WebP, HEIC and GIF images, plus MP4 and MOV videos. Pages with paired stills and videos can be saved as a single Motion Photo.
+WHAT YOU CAN SAVE
+• Images in JPEG, PNG, WebP, HEIC and GIF.
+• Videos in MP4 and MOV, up to 200 MB per file.
+• Live Photos. When a page pairs a still image with a short clip, the two are merged into one Google Motion Photo. The motion segment is copied as-is and not re-encoded.
+• Full-size files. The extension picks the largest source the page offers and strips CDN resize parameters, so you get the original file rather than the grid thumbnail.
+• Up to 60 items at once. Open the popup to see every image and video on the page with its pixel size and an Image, Live Photo or Video label, then tick the ones you want.
 
-🗂️ BATCH SAVING
-Save every large image on a page at once from the popup.
+ALBUMS
+Create an album in the popup once, and everything you save afterwards is added to it automatically. You can unbind or switch albums at any time.
 
-🔔 INSTANT FEEDBACK
-Progress and results appear in the page. If an upload fails while the tab is in the background, you get a system notification with the reason.
+HOW IT WORKS
+1. Install the extension and click the icon to sign in with Google.
+2. Right-click any image or video, or open the popup to pick several.
+3. Choose "Save to Google Photos". A progress toast shows the upload and links to the saved item.
 
-✨ HOW IT WORKS
-1. Click the extension icon and sign in with your Google account
-2. Right-click any image on the web
-3. Select "Save to Google Photos"
-4. Done! Check your Google Photos library.
+On sites that put invisible links and gradient overlays on top of photos, Chrome suppresses the image right-click menu. Those pages get a second entry, "Save image under cursor to Google Photos", which reads the cursor position and resolves the media underneath.
+
+NO DUPLICATES
+Saving the same file twice does not create a second copy in your library. The last 100 results stay in local history, including the reason when something fails.
+
+PRIVACY AND PERMISSIONS
+• Append-only access. The extension can add items to your library. The permission it requests, photoslibrary.appendonly, cannot read, edit or delete anything already in your account.
+• No servers. Files go from your browser directly to the Google Photos Library API. There is no backend, no analytics and no tracking.
+• Local state only. Upload history and duplicate fingerprints live in chrome.storage.local on your device and are never transmitted.
+• Sign-in uses Google OAuth 2.0 through the Chrome Identity API. No password ever reaches the extension.
+
+BEFORE YOU INSTALL
+• Images smaller than 300 by 300 pixels are skipped.
+• The file has to be reachable without a login. Pages behind a paywall or a hotlink check may refuse the download, and the extension reports the failure instead of uploading a broken file.
+• On pages Chrome protects, such as the Chrome Web Store, the on-page toast cannot appear even though the upload still runs. Open the popup to see the result in history.
+
+Save to Google Photos is an independent extension. It is not made by, endorsed by, or affiliated with Google.
 ```
 
 4. 上传截图:
@@ -88,12 +102,12 @@ Progress and results appear in the page. If an upload fails while the tab is in 
 
 5. 隐私相关:
    - **Privacy Policy URL**: 把 `PRIVACY_POLICY.md` 发布到 GitHub Pages 或其他公开 URL
-   - **Single Purpose**: "Allows users to save images from web pages to their Google Photos library"
+   - **Single Purpose**: "Allows users to save images, videos and Live Photos from web pages to their Google Photos library"
    - **Permissions Justification**:
      - `contextMenus`: "Adds a 'Save to Google Photos' option to the right-click menu on images"
      - `identity`: "Authenticates with the user's Google account to access Google Photos API"
      - `scripting`: "Injects the in-page status toast when a page has no content script yet"
-     - `storage`: "Keeps a local history of upload results and duplicate-detection fingerprints on this device"
+     - `storage`: "Keeps a local history of upload results, duplicate-detection fingerprints, and the album binding on this device"
      - `notifications`: "Shows a system notification when an upload fails while the page is in the background"
      - `host_permissions (<all_urls>)`: "Needed to download images from any website"
      - `host_permissions (photoslibrary)`: "Communicates with Google Photos API to upload images"

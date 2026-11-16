@@ -50,6 +50,11 @@
     return readU32(buf, off) * 0x100000000 + readU32(buf, off + 4);
   }
 
+  function writeU64(buf, off, value) {
+    writeU32(buf, off, Math.floor(value / 0x100000000));
+    writeU32(buf, off + 4, value >>> 0);
+  }
+
   function boxType(buf, off) {
     return String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
   }
@@ -178,11 +183,16 @@
   function analyzeMp4(buf) {
     const boxes = readBoxes(buf, 0, buf.length);
     const moovIndex = boxes.findIndex((b) => b.type === "moov");
-    const mdatIndex = boxes.findIndex((b) => b.type === "mdat");
+    const mdatIndices = [];
+    for (let i = 0; i < boxes.length; i++) {
+      if (boxes[i].type === "mdat") mdatIndices.push(i);
+    }
+    const mdatIndex = mdatIndices.length ? mdatIndices[0] : -1;
     return {
       boxes,
       hasMoov: moovIndex !== -1,
       hasMdat: mdatIndex !== -1,
+      mdatCount: mdatIndices.length,
       needsFaststart: moovIndex !== -1 && mdatIndex !== -1 && moovIndex > mdatIndex,
     };
   }
@@ -198,20 +208,27 @@
       const bodyStart = box.start + box.headerSize;
       const bodyEnd = box.start + box.size;
       if (box.type === "stco" || box.type === "co64") {
+        if (bodyStart + 8 > bodyEnd) continue;
         const entryCount = readU32(buf, bodyStart + 4);
         if (box.type === "stco") {
           for (let k = 0; k < entryCount; k++) {
             const p = bodyStart + 8 + k * 4;
             if (p + 4 > bodyEnd) break;
-            writeU32(buf, p, readU32(buf, p) + delta);
+            const next = readU32(buf, p) + delta;
+            if (next < 0 || next > 0xffffffff) {
+              throw new Error("MP4 stco chunk offset overflow while reordering moov.");
+            }
+            writeU32(buf, p, next);
           }
         } else {
           for (let k = 0; k < entryCount; k++) {
             const p = bodyStart + 8 + k * 8;
             if (p + 8 > bodyEnd) break;
-            const value = readU64(buf, p) + delta;
-            writeU32(buf, p, Math.floor(value / 0x100000000));
-            writeU32(buf, p + 4, value >>> 0);
+            const next = readU64(buf, p) + delta;
+            if (next < 0 || !Number.isSafeInteger(next)) {
+              throw new Error("MP4 co64 chunk offset out of range while reordering moov.");
+            }
+            writeU64(buf, p, next);
           }
         }
       } else if (CONTAINER_TYPES.has(box.type)) {
@@ -222,8 +239,13 @@
 
   // 把 moov 移到 mdat 之前，并修正 chunk offset。返回新的视频字节。
   function applyFaststart(buf) {
-    const { boxes, needsFaststart } = analyzeMp4(buf);
+    const { boxes, needsFaststart, mdatCount } = analyzeMp4(buf);
     if (!needsFaststart) return buf;
+    if (mdatCount > 1) {
+      throw new Error(
+        "The MP4 contains multiple mdat boxes with moov at the end, so faststart reordering is not supported."
+      );
+    }
 
     const moovBox = boxes.find((b) => b.type === "moov");
     const mdatBox = boxes.find((b) => b.type === "mdat");
@@ -266,12 +288,16 @@
     if (!mvhd) return null;
 
     const body = mvhd.start + mvhd.headerSize;
+    const bodyEnd = mvhd.start + mvhd.size;
+    if (body >= bodyEnd) return null;
     const version = buf[body];
     let timescale, duration;
     if (version === 1) {
+      if (body + 32 > bodyEnd) return null;
       timescale = readU32(buf, body + 20);
       duration = readU64(buf, body + 24);
     } else {
+      if (body + 20 > bodyEnd) return null;
       timescale = readU32(buf, body + 12);
       duration = readU32(buf, body + 16);
     }

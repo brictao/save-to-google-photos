@@ -65,6 +65,31 @@
       </button>
     </div>
 
+    <!-- Album -->
+    <div class="album-card" id="albumCard" style="display:none;">
+      <div class="album-head">
+        <span>Album</span>
+        <button id="albumUnbindBtn" class="link-btn" style="display:none;">Unbind</button>
+      </div>
+      <div class="album-current" id="albumCurrent" style="display:none;">
+        <a class="album-name" id="albumLink" target="_blank" rel="noopener"></a>
+      </div>
+      <div class="album-create" id="albumCreateRow">
+        <input
+          id="albumTitle"
+          class="album-input"
+          type="text"
+          maxlength="500"
+          autocomplete="off"
+          placeholder="Album name"
+        />
+        <button id="albumCreateBtn" class="btn btn-secondary">Create</button>
+      </div>
+      <p class="album-hint" id="albumHint">
+        New saves will be added to this album automatically.
+      </p>
+    </div>
+
     <!-- Recent activity -->
     <div class="history">
       <div class="history-head">
