@@ -354,9 +354,13 @@ async function linkAlbumByInput() {
             albumRestoreInput.value = "";
             setRestoreOpen(false);
             renderAlbum(response.album, response.albums || []);
+            const linkedTitle = response.album && response.album.title;
+            const hasRealTitle = linkedTitle && linkedTitle !== "Album";
             albumHint.textContent = response.unverified
-                ? "Linked by album ID. Google will confirm it on the next save."
-                : `Linked to "${response.album.title}".`;
+                ? hasRealTitle
+                    ? `Linked to "${linkedTitle}". Google will confirm it on the next save.`
+                    : "Linked by album ID. Google will confirm it on the next save."
+                : `Linked to "${linkedTitle}".`;
             albumHint.className = "album-hint";
         } else {
             albumHint.textContent = response.error || "Could not link that album.";

@@ -12,6 +12,7 @@ const messageListener = { addListener: fn => { messageHandler = fn; } };
 
 const storage = {};      // 旧版本使用的 local
 const syncStorage = {};  // 1.4 起相册绑定与清单存放于此
+let openTabs = [];       // 已打开的 photos.google.com 标签，用于标题推断
 const context = {
   console: { log: noop, warn: noop, error: noop },
   Blob, URL, TextEncoder, setTimeout, clearTimeout, AbortController,
@@ -20,7 +21,7 @@ const context = {
   chrome: {
     runtime: { onInstalled: listener, onStartup: listener, onMessage: messageListener },
     contextMenus: { create: noop, removeAll: cb => cb?.(), update: noop, onClicked: listener },
-    tabs: { onActivated: listener },
+    tabs: { onActivated: listener, query: (filter, cb) => cb(openTabs) },
     storage: {
       local: {
         get: (key, cb) => cb({ [key]: storage[key] }),
@@ -306,6 +307,36 @@ async function main() {
   context.chrome.storage.sync.get = originalSyncGet;
   assert.ok(Date.now() - syncStarted < 6000, 'storage.sync 无响应时不能挂起消息');
   console.log('PASS 存储回调无响应时按超时兜底');
+
+  // 14) albums.get 下线后，名称从已打开的相册标签页标题推断
+  assert.equal(context.cleanAlbumTitle('旅行 - Google 相册'), '旅行');
+  assert.equal(context.cleanAlbumTitle('Trips - Google Photos'), 'Trips');
+  assert.equal(context.cleanAlbumTitle('Google 相册'), '');
+  assert.equal(context.cleanAlbumTitle(''), '');
+
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  delete storage.sgp_albums;
+  delete storage.sgp_album;
+  context.fetch = async () => ({ ok: false, status: 404, text: async () => 'not found' });
+  openTabs = [
+    { url: 'https://photos.google.com/', title: 'Google 相册' },
+    { url: `https://photos.google.com/album/${albumId}?key=1`, title: '旅行照片 - Google 相册' },
+  ];
+  const named = await new Promise(resolve => {
+    messageHandler({ action: 'bindAlbum', input: albumId }, {}, resolve);
+  });
+  assert.equal(named.success, true);
+  assert.equal(named.album.title, '旅行照片');
+  assert.equal(syncStorage.sgp_album.title, '旅行照片');
+
+  // 清单里已存占位名时，重新绑定也要修正
+  syncStorage.sgp_albums = [{ id: albumId, title: 'Album', itemCount: 0 }];
+  const renamed = await new Promise(resolve => {
+    messageHandler({ action: 'bindAlbum', input: albumId }, {}, resolve);
+  });
+  assert.equal(renamed.album.title, '旅行照片');
+  console.log('PASS 相册名称从标签页标题推断，并修正已有占位名');
 }
 
 main().catch(error => {

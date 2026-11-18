@@ -887,6 +887,43 @@ function parseAlbumId(input) {
   return "";
 }
 
+// 相册页面的标签标题通常是 "旅行 - Google 相册" 或 "Trips - Google Photos"。
+// 去掉浏览器附加的站点后缀，只留相册名。
+function cleanAlbumTitle(raw) {
+  const title = String(raw || "").trim();
+  if (!title) return "";
+  const cleaned = title
+    .replace(/\s+[-–—]\s+Google\s*(Photos|相册|相簿|相冊)?\s*$/i, "")
+    .trim();
+  if (!cleaned || /^Google\s*(Photos|相册|相簿|相冊)?$/i.test(cleaned)) return "";
+  return cleaned.slice(0, 40);
+}
+
+// albums.get 已下线，拿不到相册标题。用户粘贴链接时相册页通常还开着，
+// 从标签页标题推断；读不到就保持占位名称。
+async function inferAlbumTitle(albumId) {
+  const api = chrome.tabs;
+  if (!api || typeof api.query !== "function") return "";
+  const tabs = await withTimeout(
+    new Promise((resolve) => {
+      try {
+        api.query({ url: "https://photos.google.com/*" }, (items) => resolve(items || []));
+      } catch {
+        resolve([]);
+      }
+    }),
+    2000,
+    []
+  );
+  for (const tab of tabs) {
+    const url = String(tab?.url || "");
+    if (!url.includes(albumId)) continue;
+    const title = cleanAlbumTitle(tab.title);
+    if (title) return title;
+  }
+  return "";
+}
+
 // albums.get 不一定对所有账号可用。读到元数据就顺手拿到标题和可写状态，
 // 读不到时按 id 直接绑定，真正的写入校验留给保存时的 batchAddMediaItems。
 async function readAlbumMeta(token, albumId) {
@@ -1788,8 +1825,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       .then(async (albums) => {
         const known = albums.find((item) => item.id === albumId);
         if (known) {
-          await setAlbumSetting(known);
-          sendResponse({ success: true, album: known, albums });
+          // 早期绑定时拿不到标题，清单里留下的是占位名。重新绑定时顺手修正。
+          const inferred =
+            !known.title || known.title === "Album" ? await inferAlbumTitle(albumId) : "";
+          const album = inferred ? { ...known, title: inferred } : known;
+          if (inferred) await rememberAlbum(album);
+          await setAlbumSetting(album);
+          sendResponse({ success: true, album, albums: await getAlbumList() });
           return;
         }
 
@@ -1830,6 +1872,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           // 其余情况先按 id 绑定，下次保存失败时 archiveToAlbum 会清掉失效绑定。
           if (err.status === 401) throw err;
           unverified = true;
+        }
+
+        if (album.title === "Album") {
+          const inferred = await inferAlbumTitle(albumId);
+          if (inferred) album = { ...album, title: inferred };
         }
 
         await setAlbumSetting(album);
