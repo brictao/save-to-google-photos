@@ -363,7 +363,10 @@ async function linkAlbumByInput() {
             albumHint.className = "album-hint error";
         }
     } catch (error) {
-        albumHint.textContent = error.message || "Could not link that album.";
+        const reason = (error && error.message) || "";
+        albumHint.textContent = /message port closed/i.test(reason)
+            ? "The extension stopped responding. Reload it from the extensions page and try again."
+            : reason || "Could not link that album.";
         albumHint.className = "album-hint error";
     } finally {
         albumRestoreBtn.disabled = false;

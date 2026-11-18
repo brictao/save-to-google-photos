@@ -729,11 +729,36 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // 6b. 相册：创建、绑定、把已上传的项归入相册
 // --------------------------------------------------
 // 相册绑定与清单存在 chrome.storage.sync，换设备和卸载重装后能恢复。
+// 个别环境（例如 Edge 未登录同步账号）的回调可能一直不触发。消息处理必须
+// 给出响应，否则 popup 会收到 "The message port closed" 而看不到真实原因。
+const SYNC_TIMEOUT_MS = 4000;
+const ALBUM_META_TIMEOUT_MS = 8000;
+
+function withTimeout(promise, ms, fallback) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 function syncGet(key) {
   return new Promise((resolve) => {
     const sync = chrome.storage?.sync;
     if (!sync) return resolve(undefined);
-    sync.get(key, (data) => resolve(data ? data[key] : undefined));
+    const timer = setTimeout(() => resolve(undefined), SYNC_TIMEOUT_MS);
+    sync.get(key, (data) => {
+      clearTimeout(timer);
+      resolve(data ? data[key] : undefined);
+    });
   });
 }
 
@@ -741,7 +766,11 @@ function syncSet(key, value) {
   return new Promise((resolve) => {
     const sync = chrome.storage?.sync;
     if (!sync) return resolve();
-    sync.set({ [key]: value }, () => resolve());
+    const timer = setTimeout(() => resolve(), SYNC_TIMEOUT_MS);
+    sync.set({ [key]: value }, () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }
 
@@ -1772,7 +1801,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         };
         let unverified = false;
         try {
-          const meta = await withAuthRetry((token) => readAlbumMeta(token, albumId));
+          // 校验元数据只用于补标题。网络或授权卡住时不能让整条消息挂起，
+          // 超时就直接按 ID 绑定，下一次保存会验证这个 ID 是否可写。
+          const meta = await withTimeout(
+            withAuthRetry((token) => readAlbumMeta(token, albumId)),
+            ALBUM_META_TIMEOUT_MS,
+            null
+          );
           if (meta?.isWriteable === false) {
             sendResponse({
               success: false,
@@ -1780,12 +1815,16 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             });
             return;
           }
-          album = {
-            id: meta.id || albumId,
-            title: meta.title || "Album",
-            productUrl: meta.productUrl || album.productUrl,
-            itemCount: meta.itemCount || 0,
-          };
+          if (meta) {
+            album = {
+              id: meta.id || albumId,
+              title: meta.title || "Album",
+              productUrl: meta.productUrl || album.productUrl,
+              itemCount: meta.itemCount || 0,
+            };
+          } else {
+            unverified = true;
+          }
         } catch (err) {
           // albums.get 在部分账号或相册上不可用。除了 401 说明授权本身失效，
           // 其余情况先按 id 绑定，下次保存失败时 archiveToAlbum 会清掉失效绑定。

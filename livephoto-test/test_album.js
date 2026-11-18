@@ -268,6 +268,44 @@ async function main() {
   assert.equal(duplicate.existing.id, 'trip-1');
   assert.equal(fetchCalls, 0, '同名时不应发起创建请求');
   console.log('PASS 同名相册被拦下，不发创建请求');
+
+  // 12) 相册链接绑定：元数据不可读时仍按链接里的 id 绑定
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  delete storage.sgp_albums;
+  delete storage.sgp_album;
+  context.fetch = async () => ({
+    ok: false,
+    status: 403,
+    text: async () => 'PERMISSION_DENIED',
+  });
+  const albumId = 'AF1QipOFp_mmPMJ-GScK0Jbb0AASC7N87NNqJBTdXyqx';
+  const linked = await new Promise(resolve => {
+    messageHandler(
+      { action: 'bindAlbum', input: `https://photos.google.com/album/${albumId}` },
+      {},
+      resolve
+    );
+  });
+  assert.equal(linked.success, true);
+  assert.equal(linked.unverified, true);
+  assert.equal(linked.album.id, albumId);
+  assert.equal(syncStorage.sgp_album.id, albumId);
+  console.log('PASS 相册链接绑定，元数据不可读时按 id 记录');
+
+  // 13) 超时兜底：只给回调且永远不回调的接口不能把消息挂住
+  const started = Date.now();
+  assert.equal(await context.withTimeout(new Promise(() => {}), 40, 'fallback'), 'fallback');
+  assert.ok(Date.now() - started < 1000, 'withTimeout 应及时返回兜底值');
+
+  const originalSyncGet = context.chrome.storage.sync.get;
+  context.chrome.storage.sync.get = () => {};
+  const syncStarted = Date.now();
+  const emptyList = await context.getAlbumList();
+  assert.equal(Array.isArray(emptyList) && emptyList.length, 0);
+  context.chrome.storage.sync.get = originalSyncGet;
+  assert.ok(Date.now() - syncStarted < 6000, 'storage.sync 无响应时不能挂起消息');
+  console.log('PASS 存储回调无响应时按超时兜底');
 }
 
 main().catch(error => {
