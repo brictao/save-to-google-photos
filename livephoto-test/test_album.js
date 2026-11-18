@@ -6,15 +6,19 @@ const path = require('node:path');
 const vm = require('node:vm');
 const noop = () => {};
 const listener = { addListener: noop };
+// 单独捕获 onMessage 回调，用于验证消息层行为
+let messageHandler = null;
+const messageListener = { addListener: fn => { messageHandler = fn; } };
 
-const storage = {};
+const storage = {};      // 旧版本使用的 local
+const syncStorage = {};  // 1.4 起相册绑定与清单存放于此
 const context = {
   console: { log: noop, warn: noop, error: noop },
   Blob, URL, TextEncoder, setTimeout, clearTimeout, AbortController,
   importScripts: noop,
   self: { MotionPhoto: {} },
   chrome: {
-    runtime: { onInstalled: listener, onStartup: listener, onMessage: listener },
+    runtime: { onInstalled: listener, onStartup: listener, onMessage: messageListener },
     contextMenus: { create: noop, removeAll: cb => cb?.(), update: noop, onClicked: listener },
     tabs: { onActivated: listener },
     storage: {
@@ -22,6 +26,13 @@ const context = {
         get: (key, cb) => cb({ [key]: storage[key] }),
         set: (obj, cb) => {
           Object.assign(storage, obj);
+          cb?.();
+        },
+      },
+      sync: {
+        get: (key, cb) => cb({ [key]: syncStorage[key] }),
+        set: (obj, cb) => {
+          Object.assign(syncStorage, obj);
           cb?.();
         },
       },
@@ -158,6 +169,105 @@ async function main() {
   assert.equal(counts.saved, 3);
   assert.deepEqual(batchAdds, [['media-a', 'media-b', 'media-c']]);
   console.log('PASS 批量保存只发一次归档请求');
+
+  // 8) 清单：创建累积、切换绑定、相册失效后移出
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  delete storage.sgp_albums;
+  delete storage.sgp_album;
+
+  context.fetch = async (url, init) => {
+    const title = JSON.parse(init.body).album.title;
+    return {
+      ok: true,
+      json: async () => ({
+        id: `id-${title}`,
+        title,
+        productUrl: `https://photos.google.com/album/id-${title}`,
+      }),
+    };
+  };
+
+  const first = await context.createAlbum('token', 'Trips');
+  await context.setAlbumSetting(first);
+  await context.rememberAlbum(first);
+
+  const second = await context.createAlbum('token', 'Work');
+  await context.setAlbumSetting(second);
+  await context.rememberAlbum(second);
+
+  let albumList = await context.getAlbumList();
+  assert.equal(albumList.map(item => item.id).join(','), 'id-Work,id-Trips');
+  assert.equal((await context.getAlbumSetting()).id, 'id-Work');
+
+  // 切回先创建的那个
+  await context.setAlbumSetting(albumList.find(item => item.id === 'id-Trips'));
+  assert.equal((await context.getAlbumSetting()).id, 'id-Trips');
+
+  // 被选中的相册在 Google 侧删掉后，绑定和清单都要清掉它
+  context.fetch = async () => ({
+    ok: false,
+    status: 404,
+    text: async () => 'Requested entity was not found.',
+  });
+  await context.archiveToAlbum(['m1']);
+  albumList = await context.getAlbumList();
+  assert.equal(albumList.map(item => item.id).join(','), 'id-Work');
+  assert.equal(await context.getAlbumSetting(), null);
+  assert.ok(Array.isArray(syncStorage.sgp_albums), '清单应写入 sync');
+  assert.equal(storage.sgp_albums, undefined, '清单不应写入 local');
+  console.log('PASS 清单累积、切换绑定、失效后移出，数据写入 sync');
+
+  // 9) 1.3 只存单个绑定且在 local，升级后搬到 sync 并清掉旧值
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  storage.sgp_album = { id: 'legacy', title: 'Legacy', productUrl: '', itemCount: 7 };
+  const migrated = await context.ensureAlbumList();
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].id, 'legacy');
+  assert.equal(migrated[0].itemCount, 7);
+  assert.equal(syncStorage.sgp_album.id, 'legacy');
+  assert.equal(storage.sgp_album, null);
+  console.log('PASS 旧版 local 绑定迁移到 sync 并清理');
+
+  // 10) 清单有上限，超出后淘汰最早的一条
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  for (let i = 0; i < 35; i += 1) {
+    await context.rememberAlbum({
+      id: `cap-${i}`,
+      title: `Cap ${i}`,
+      productUrl: '',
+      itemCount: 0,
+    });
+  }
+  const capped = await context.getAlbumList();
+  assert.equal(capped.length, 20);
+  assert.equal(capped[0].id, 'cap-34');
+  assert.equal(capped.some(item => item.id === 'cap-0'), false);
+  console.log('PASS 清单上限 20，超出的最早条目被淘汰');
+
+  // 11) 同名相册被拦下，不发创建请求，提示切换到已有相册
+  delete syncStorage.sgp_albums;
+  delete syncStorage.sgp_album;
+  delete storage.sgp_albums;
+  delete storage.sgp_album;
+  await context.rememberAlbum({ id: 'trip-1', title: 'Trips', itemCount: 0 });
+
+  let fetchCalls = 0;
+  context.fetch = async () => {
+    fetchCalls += 1;
+    return { ok: true, json: async () => ({}) };
+  };
+
+  const duplicate = await new Promise(resolve => {
+    messageHandler({ action: 'createAlbum', title: 'Trips' }, {}, resolve);
+  });
+  assert.equal(duplicate.success, false);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.existing.id, 'trip-1');
+  assert.equal(fetchCalls, 0, '同名时不应发起创建请求');
+  console.log('PASS 同名相册被拦下，不发创建请求');
 }
 
 main().catch(error => {
