@@ -11,7 +11,7 @@ A Chrome extension that lets you right-click any image on the web and save it di
 - 📷 **Images and videos** — JPEG, PNG, WebP, HEIC and GIF; MP4 and MOV videos
 - 🎞️ **Live Photo support** — Merges a page's photo and its paired video into one Google Motion Photo file, without re-encoding
 - 🗂️ **Batch saving** — Saves every large image on the current page from the popup
-- 📚 **Album grouping** — Create one album in the popup and every later save is added to it automatically
+- 📚 **Album grouping** — Create several albums in the popup and switch which one later saves land in. Paste an album link to re-link an existing album after reinstalling
 - ♻️ **Duplicate guard** — Remembers what was already uploaded so a repeated click does not create a second copy
 - 🧾 **Local history** — Keeps the last 100 results on this device, including failure reasons
 

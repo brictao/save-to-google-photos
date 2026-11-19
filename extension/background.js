@@ -9,9 +9,15 @@ const GOOGLE_PHOTOS_UPLOAD_URL =
 const GOOGLE_PHOTOS_BATCH_CREATE_URL =
   "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate";
 const GOOGLE_PHOTOS_ALBUMS_URL = "https://photoslibrary.googleapis.com/v1/albums";
-// albums.list 在 2025 年 3 月的 API 收缩中移除，拿不到相册清单，
-// 只能把创建时返回的 id 存下来，后续上传时复用。
+// albums.list 在 2025 年 3 月的 API 收缩中移除，无法枚举 Google Photos
+// 里的已有相册。只能记录本扩展创建过的相册，供绑定切换使用。
+// 绑定和清单存 chrome.storage.sync，多设备或重装后有机会恢复。Chrome 在
+// 卸载扩展时会把扩展数据一起清掉，所以 sync 不能当备份。清单丢失后可以用
+// 相册链接重新绑定，见 bindAlbum。
 const ALBUM_KEY = "sgp_album";
+const ALBUM_LIST_KEY = "sgp_albums";
+// sync 单键上限 8KB，清单只存必要字段并截断标题，20 条留足余量
+const ALBUM_LIST_MAX = 20;
 // albums.batchAddMediaItems 单次上限 50 项，单个相册上限 20000 项
 const ALBUM_ADD_CHUNK = 50;
 const ALBUM_MAX_ITEMS = 20000;
@@ -722,18 +728,213 @@ async function createMediaItem(token, uploadToken, fileName, sourceUrl) {
 // --------------------------------------------------
 // 6b. 相册：创建、绑定、把已上传的项归入相册
 // --------------------------------------------------
+// 相册绑定与清单存在 chrome.storage.sync，换设备和卸载重装后能恢复。
+// 个别环境（例如 Edge 未登录同步账号）的回调可能一直不触发。消息处理必须
+// 给出响应，否则 popup 会收到 "The message port closed" 而看不到真实原因。
+const SYNC_TIMEOUT_MS = 4000;
+const ALBUM_META_TIMEOUT_MS = 8000;
+
+function withTimeout(promise, ms, fallback) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function syncGet(key) {
+  return new Promise((resolve) => {
+    const sync = chrome.storage?.sync;
+    if (!sync) return resolve(undefined);
+    const timer = setTimeout(() => resolve(undefined), SYNC_TIMEOUT_MS);
+    sync.get(key, (data) => {
+      clearTimeout(timer);
+      resolve(data ? data[key] : undefined);
+    });
+  });
+}
+
+function syncSet(key, value) {
+  return new Promise((resolve) => {
+    const sync = chrome.storage?.sync;
+    if (!sync) return resolve();
+    const timer = setTimeout(() => resolve(), SYNC_TIMEOUT_MS);
+    sync.set({ [key]: value }, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+// sync 读不到时回退 local，兼容 1.3 及更早写在本地的数据。
+async function albumRead(key) {
+  const value = await syncGet(key);
+  if (value !== undefined && value !== null) return value;
+  return storageGet(key);
+}
+
+// 1.3 及更早把绑定和清单存在 local，首次读取时搬到 sync 并清掉旧值。
+async function migrateAlbumStorage() {
+  const localAlbum = await storageGet(ALBUM_KEY);
+  const localList = await storageGet(ALBUM_LIST_KEY);
+  const hasLegacy =
+    Boolean(localAlbum && localAlbum.id) ||
+    (Array.isArray(localList) && localList.length > 0);
+  if (!hasLegacy) return;
+
+  const syncAlbum = await syncGet(ALBUM_KEY);
+  if ((syncAlbum === undefined || syncAlbum === null) && localAlbum && localAlbum.id) {
+    await syncSet(ALBUM_KEY, localAlbum);
+  }
+
+  const syncList = await syncGet(ALBUM_LIST_KEY);
+  if (
+    (!Array.isArray(syncList) || !syncList.length) &&
+    Array.isArray(localList) &&
+    localList.length
+  ) {
+    await syncSet(ALBUM_LIST_KEY, localList.slice(0, ALBUM_LIST_MAX));
+  }
+
+  await storageSet(ALBUM_KEY, null);
+  await storageSet(ALBUM_LIST_KEY, null);
+}
+
 async function getAlbumSetting() {
-  const value = await storageGet(ALBUM_KEY);
+  const value = await albumRead(ALBUM_KEY);
   if (!value || typeof value.id !== "string" || !value.id) return null;
   return value;
 }
 
 function setAlbumSetting(album) {
-  return storageSet(ALBUM_KEY, album);
+  return syncSet(ALBUM_KEY, album);
 }
 
 function clearAlbumSetting() {
-  return storageSet(ALBUM_KEY, null);
+  return syncSet(ALBUM_KEY, null);
+}
+
+// 相册清单：albums.list 已移除，这里只保存本扩展创建过的相册。
+async function getAlbumList() {
+  const value = await albumRead(ALBUM_LIST_KEY);
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((album) => album && typeof album.id === "string" && album.id)
+    .map((album) => ({
+      ...album,
+      title: album.title || "Album",
+      // 清单不存 productUrl，按 id 重建，省下 sync 配额
+      productUrl: album.productUrl || `https://photos.google.com/album/${album.id}`,
+    }));
+}
+
+function setAlbumList(list) {
+  return syncSet(ALBUM_LIST_KEY, list.slice(0, ALBUM_LIST_MAX));
+}
+
+// 新增或更新一条，最近使用的排在最前
+async function rememberAlbum(album) {
+  const list = await getAlbumList();
+  const index = list.findIndex((item) => item.id === album.id);
+  const entry = {
+    id: album.id,
+    // 标题只保留展示需要的长度，避免长名字吃掉 sync 配额
+    title: String(album.title || "Album").slice(0, 40),
+    itemCount: album.itemCount || 0,
+    createdAt: index >= 0 ? list[index].createdAt : Date.now(),
+  };
+  if (index >= 0) list[index] = entry;
+  else list.unshift(entry);
+  await setAlbumList(list);
+  return entry;
+}
+
+async function forgetAlbum(albumId) {
+  const list = await getAlbumList();
+  await setAlbumList(list.filter((item) => item.id !== albumId));
+}
+
+// 1.3 及更早只存了单个绑定，升级后把它补进清单，避免清单为空。
+async function ensureAlbumList() {
+  await migrateAlbumStorage();
+  const list = await getAlbumList();
+  if (list.length) return list;
+  const current = await getAlbumSetting();
+  if (!current) return [];
+  await rememberAlbum(current);
+  return getAlbumList();
+}
+
+// 相册链接形如 https://photos.google.com/album/<id>，也可能带 /u/0/ 前缀
+// 或 ?key= 之类的分享参数。分享链接是 /share/<id>，id 与接口里的相册 id
+// 相同。这里只取路径里的 id，也接受直接粘贴 id。
+function parseAlbumId(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  const match = raw.match(
+    /photos\.google\.com\/(?:u\/\d+\/)?(?:album|share)\/([A-Za-z0-9_-]+)/i
+  );
+  if (match) return match[1];
+  if (/^[A-Za-z0-9_-]{16,}$/.test(raw)) return raw;
+  return "";
+}
+
+// 相册页面的标签标题通常是 "旅行 - Google 相册" 或 "Trips - Google Photos"。
+// 去掉浏览器附加的站点后缀，只留相册名。
+function cleanAlbumTitle(raw) {
+  const title = String(raw || "").trim();
+  if (!title) return "";
+  const cleaned = title
+    .replace(/\s+[-–—]\s+Google\s*(Photos|相册|相簿|相冊)?\s*$/i, "")
+    .trim();
+  if (!cleaned || /^Google\s*(Photos|相册|相簿|相冊)?$/i.test(cleaned)) return "";
+  return cleaned.slice(0, 40);
+}
+
+// albums.get 已下线，拿不到相册标题。用户粘贴链接时相册页通常还开着，
+// 从标签页标题推断；读不到就保持占位名称。
+async function inferAlbumTitle(albumId) {
+  const api = chrome.tabs;
+  if (!api || typeof api.query !== "function") return "";
+  const tabs = await withTimeout(
+    new Promise((resolve) => {
+      try {
+        api.query({ url: "https://photos.google.com/*" }, (items) => resolve(items || []));
+      } catch {
+        resolve([]);
+      }
+    }),
+    2000,
+    []
+  );
+  for (const tab of tabs) {
+    const url = String(tab?.url || "");
+    if (!url.includes(albumId)) continue;
+    const title = cleanAlbumTitle(tab.title);
+    if (title) return title;
+  }
+  return "";
+}
+
+// albums.get 不一定对所有账号可用。读到元数据就顺手拿到标题和可写状态，
+// 读不到时按 id 直接绑定，真正的写入校验留给保存时的 batchAddMediaItems。
+async function readAlbumMeta(token, albumId) {
+  const response = await fetch(
+    `${GOOGLE_PHOTOS_ALBUMS_URL}/${encodeURIComponent(albumId)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!response.ok) {
+    throw httpError("Read album", response, await response.text());
+  }
+  return response.json();
 }
 
 async function createAlbum(token, title) {
@@ -809,8 +1010,9 @@ async function archiveToAlbum(mediaItemIds) {
   } catch (err) {
     console.error("[Save to Google Photos] Album", err);
     if (isAlbumGone(err)) {
-      // 相册被用户删掉后 id 会一直失效，清掉绑定避免后续每张都报错
+      // 相册被用户删掉后 id 会一直失效，清掉绑定并移出清单，避免后续每张都报错
       await clearAlbumSetting();
+      await forgetAlbum(album.id);
       return {
         added: 0,
         albumTitle: "",
@@ -826,7 +1028,9 @@ async function archiveToAlbum(mediaItemIds) {
   }
 
   const total = (album.itemCount || 0) + ids.length;
-  await setAlbumSetting({ ...album, itemCount: total });
+  const updated = { ...album, itemCount: total };
+  await setAlbumSetting(updated);
+  await rememberAlbum(updated);
 
   const overflow =
     total > ALBUM_MAX_ITEMS
@@ -1553,16 +1757,136 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === "getAlbums") {
+    ensureAlbumList()
+      .then(async (albums) => {
+        const album = await getAlbumSetting();
+        sendResponse({ success: true, albums, album });
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "selectAlbum") {
+    const albumId = String(request.albumId || "");
+    ensureAlbumList()
+      .then(async (albums) => {
+        const album = albums.find((item) => item.id === albumId);
+        if (!album) {
+          sendResponse({
+            success: false,
+            error: "That album is not in the local list anymore.",
+            albums,
+          });
+          return;
+        }
+        await setAlbumSetting(album);
+        sendResponse({ success: true, album, albums });
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   if (request.action === "createAlbum") {
     const title = String(request.title || "").trim();
     if (!title) {
       sendResponse({ success: false, error: "Album name cannot be empty." });
       return true;
     }
-    withAuthRetry((token) => createAlbum(token, title))
-      .then(async (album) => {
+    ensureAlbumList()
+      .then(async (albums) => {
+        // Google 允许同名相册，各建一个会把照片分散开。先在本地拦截，
+        // 让用户选择切到已有的那个，或换个名字。清单标题截断到 40 字符，
+        // 比较时按同样长度归一化。
+        const existing = albums.find((item) => item.title === title.slice(0, 40));
+        if (existing) {
+          sendResponse({ success: false, duplicate: true, existing, albums });
+          return;
+        }
+        const album = await withAuthRetry((token) => createAlbum(token, title));
         await setAlbumSetting(album);
-        sendResponse({ success: true, album });
+        await rememberAlbum(album);
+        sendResponse({ success: true, album, albums: await getAlbumList() });
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (request.action === "bindAlbum") {
+    const albumId = parseAlbumId(request.input);
+    if (!albumId) {
+      sendResponse({
+        success: false,
+        error: "That does not look like a Google Photos album link.",
+      });
+      return true;
+    }
+    ensureAlbumList()
+      .then(async (albums) => {
+        const known = albums.find((item) => item.id === albumId);
+        if (known) {
+          // 早期绑定时拿不到标题，清单里留下的是占位名。重新绑定时顺手修正。
+          const inferred =
+            !known.title || known.title === "Album" ? await inferAlbumTitle(albumId) : "";
+          const album = inferred ? { ...known, title: inferred } : known;
+          if (inferred) await rememberAlbum(album);
+          await setAlbumSetting(album);
+          sendResponse({ success: true, album, albums: await getAlbumList() });
+          return;
+        }
+
+        let album = {
+          id: albumId,
+          title: "Album",
+          productUrl: `https://photos.google.com/album/${albumId}`,
+          itemCount: 0,
+        };
+        let unverified = false;
+        try {
+          // 校验元数据只用于补标题。网络或授权卡住时不能让整条消息挂起，
+          // 超时就直接按 ID 绑定，下一次保存会验证这个 ID 是否可写。
+          const meta = await withTimeout(
+            withAuthRetry((token) => readAlbumMeta(token, albumId)),
+            ALBUM_META_TIMEOUT_MS,
+            null
+          );
+          if (meta?.isWriteable === false) {
+            sendResponse({
+              success: false,
+              error: "This album is read-only, so new photos cannot be added to it.",
+            });
+            return;
+          }
+          if (meta) {
+            album = {
+              id: meta.id || albumId,
+              title: meta.title || "Album",
+              productUrl: meta.productUrl || album.productUrl,
+              itemCount: meta.itemCount || 0,
+            };
+          } else {
+            unverified = true;
+          }
+        } catch (err) {
+          // albums.get 在部分账号或相册上不可用。除了 401 说明授权本身失效，
+          // 其余情况先按 id 绑定，下次保存失败时 archiveToAlbum 会清掉失效绑定。
+          if (err.status === 401) throw err;
+          unverified = true;
+        }
+
+        if (album.title === "Album") {
+          const inferred = await inferAlbumTitle(albumId);
+          if (inferred) album = { ...album, title: inferred };
+        }
+
+        await setAlbumSetting(album);
+        await rememberAlbum(album);
+        sendResponse({
+          success: true,
+          album,
+          albums: await getAlbumList(),
+          unverified,
+        });
       })
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
